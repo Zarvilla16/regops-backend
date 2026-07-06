@@ -1,0 +1,16 @@
+{
+  "name": "@regops/shared",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "eslint . --max-warnings=0",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@regops/config": "workspace:*",
+    "typescript": "^5.7.2"
+  }
+}

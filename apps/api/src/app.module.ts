@@ -1,0 +1,60 @@
+import { MiddlewareConsumer, Module, NestModule } from "@nestjs/common";
+import { ConfigModule, ConfigService } from "@nestjs/config";
+import { APP_FILTER, APP_INTERCEPTOR } from "@nestjs/core";
+import { JwtModule } from "@nestjs/jwt";
+import { TypeOrmModule } from "@nestjs/typeorm";
+import { entities } from "@regops/db";
+import configuration from "./config/configuration";
+import { validateEnv } from "./config/env.validation";
+import { AllExceptionsFilter } from "./common/filters/all-exceptions.filter";
+import { AuditInterceptor } from "./common/interceptors/audit.interceptor";
+import { IdempotencyInterceptor } from "./common/interceptors/idempotency.interceptor";
+import { ResponseInterceptor } from "./common/interceptors/response.interceptor";
+import { TenantContextMiddleware } from "./common/middleware/tenant-context.middleware";
+import { AuthModule } from "./auth/auth.module";
+import { TenantsModule } from "./tenants/tenants.module";
+import { UsersModule } from "./users/users.module";
+import { AuditModule } from "./audit/audit.module";
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      load: [configuration],
+      validate: validateEnv,
+    }),
+    TypeOrmModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => ({
+        type: "postgres",
+        // Connects as regops_app (NO BYPASSRLS) so Postgres RLS is enforced
+        // for every query the running API issues.
+        url: config.get<string>("database.url"),
+        entities,
+        synchronize: false,
+        migrationsRun: false,
+        logging: config.get<string>("nodeEnv") === "development" ? ["error", "warn"] : ["error"],
+      }),
+    }),
+    JwtModule.register({}),
+    AuditModule,
+    AuthModule,
+    TenantsModule,
+    UsersModule,
+  ],
+  providers: [
+    TenantContextMiddleware,
+    { provide: APP_FILTER, useClass: AllExceptionsFilter },
+    // Order matters: Response is outermost (wraps everything sent to the
+    // client), Idempotency may short-circuit before the handler/Audit ever
+    // run, Audit is innermost so it observes the handler's real result.
+    { provide: APP_INTERCEPTOR, useClass: ResponseInterceptor },
+    { provide: APP_INTERCEPTOR, useClass: IdempotencyInterceptor },
+    { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
+  ],
+})
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer): void {
+    consumer.apply(TenantContextMiddleware).forRoutes("*");
+  }
+}

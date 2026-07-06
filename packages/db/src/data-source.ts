@@ -1,0 +1,39 @@
+import "reflect-metadata";
+import * as dotenv from "dotenv";
+import { DataSource, DataSourceOptions } from "typeorm";
+import { TenantEntity } from "./entities/tenant.entity";
+import { UserEntity } from "./entities/user.entity";
+import { RefreshTokenEntity } from "./entities/refresh-token.entity";
+import { AuditLogEntity } from "./entities/audit-log.entity";
+import { IdempotencyKeyEntity } from "./entities/idempotency-key.entity";
+
+dotenv.config();
+
+export const entities = [
+  TenantEntity,
+  UserEntity,
+  RefreshTokenEntity,
+  AuditLogEntity,
+  IdempotencyKeyEntity,
+];
+
+/**
+ * Connection string used for running migrations/seeds. Must point at the
+ * regops_admin role (BYPASSRLS) — the running API instead connects with
+ * DATABASE_URL (regops_app, no bypass) so RLS is actually enforced.
+ */
+const adminUrl =
+  process.env.DATABASE_ADMIN_URL ??
+  "postgres://regops_admin:regops_admin_password@localhost:5432/regops";
+
+export const dataSourceOptions: DataSourceOptions = {
+  type: "postgres",
+  url: adminUrl,
+  entities,
+  migrations: [__dirname + "/migrations/*.{ts,js}"],
+  migrationsTableName: "typeorm_migrations",
+  synchronize: false,
+  logging: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
+};
+
+export const AppDataSource = new DataSource(dataSourceOptions);
