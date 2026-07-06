@@ -61,7 +61,7 @@ cp apps/worker/.env.example apps/worker/.env
 # distinct random string of 64+ characters. Generate with e.g.:
 #   openssl rand -hex 64
 
-docker-compose up -d      # postgres:5432, redis:6379, mailhog:8025
+docker-compose up -d      # postgres:5433, redis:6379, mailhog:8025
 pnpm build                # compiles packages/shared and packages/db (apps import compiled dist)
 pnpm db:migrate           # applies schema + RLS policies (see packages/db/src/migrations)
 pnpm db:seed              # creates the accounts below

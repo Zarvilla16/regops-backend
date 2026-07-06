@@ -1,4 +1,4 @@
-import { Injectable, NestMiddleware } from "@nestjs/common";
+import { Injectable, Logger, NestMiddleware } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { JwtService } from "@nestjs/jwt";
 import { NextFunction, Request, Response } from "express";
@@ -23,13 +23,39 @@ const TENANT_OVERRIDE_HEADER = "x-tenant-override";
  *     caller's own tenantId, unless the caller is SUPER_ADMIN and supplied
  *     X-Tenant-Override — this is the only path that may cross tenants.
  *  3. Opens one dedicated Postgres connection (QueryRunner) for the request,
- *     stamps `app.current_tenant_id` / `app.bypass_rls` as session-local
- *     settings on it, and stores it on `req.queryRunner`. Every tenant-scoped
- *     repository call for this request MUST reuse this connection — pulling
- *     a fresh connection from the pool would carry no RLS context.
+ *     stamps `app.current_tenant_id` / `app.bypass_rls` via `set_config(..., true)`
+ *     (transaction-local), and stores it on `req.queryRunner`. Every
+ *     tenant-scoped repository call for this request MUST reuse this
+ *     connection — pulling a fresh connection from the pool would carry no
+ *     RLS context.
+ *
+ *     `set_config`'s third argument (`is_local`) only survives for the
+ *     lifetime of an actual transaction — outside of one, Postgres commits
+ *     and discards it as soon as that single statement finishes, so a later
+ *     query on the very same connection would see it unset again. This
+ *     middleware therefore opens the request's transaction here; services
+ *     that open their own nested `startTransaction()`/`commitTransaction()`
+ *     for atomic writes (see UsersService) safely become SAVEPOINTs within it
+ *     (TypeORM tracks transaction depth), so this doesn't change their
+ *     behavior. Session-level (`is_local = false`) was deliberately avoided:
+ *     `release()` returns the underlying connection to the pg pool for reuse
+ *     by a future, unrelated request, and a session-level setting would leak
+ *     this request's tenant context into whatever picks up that connection
+ *     next.
+ *
+ *     The transaction is committed by TransactionInterceptor, not here —
+ *     that runs inside the interceptor chain, before Nest hands the response
+ *     to Express, so a client never sees a success response for a write that
+ *     hasn't actually committed. The `res.on("finish")` handler below is only
+ *     a safety net for requests that never reach an interceptor at all (e.g.
+ *     a path Express itself 404s with no matching controller): if the
+ *     transaction is still open by the time the response finishes, something
+ *     skipped it, so we roll back and release rather than leak the connection.
  */
 @Injectable()
 export class TenantContextMiddleware implements NestMiddleware {
+  private readonly logger = new Logger(TenantContextMiddleware.name);
+
   constructor(
     private readonly dataSource: DataSource,
     private readonly jwtService: JwtService,
@@ -55,6 +81,7 @@ export class TenantContextMiddleware implements NestMiddleware {
 
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
+    await queryRunner.startTransaction();
     await queryRunner.query(
       `SELECT set_config('app.current_tenant_id', $1, true), set_config('app.bypass_rls', $2, true)`,
       [effectiveTenantId, bypassRls ? "true" : "false"],
@@ -62,7 +89,19 @@ export class TenantContextMiddleware implements NestMiddleware {
 
     (req as any).queryRunner = queryRunner;
     res.on("finish", () => {
-      void queryRunner.release();
+      void (async () => {
+        try {
+          if (queryRunner.isTransactionActive) {
+            await queryRunner.rollbackTransaction();
+          }
+        } catch (err) {
+          this.logger.error("Failed to roll back an unclaimed request transaction", err as Error);
+        } finally {
+          if (!queryRunner.isReleased) {
+            await queryRunner.release();
+          }
+        }
+      })();
     });
 
     next();

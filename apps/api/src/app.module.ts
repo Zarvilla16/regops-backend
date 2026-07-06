@@ -10,6 +10,7 @@ import { AllExceptionsFilter } from "./common/filters/all-exceptions.filter";
 import { AuditInterceptor } from "./common/interceptors/audit.interceptor";
 import { IdempotencyInterceptor } from "./common/interceptors/idempotency.interceptor";
 import { ResponseInterceptor } from "./common/interceptors/response.interceptor";
+import { TransactionInterceptor } from "./common/interceptors/transaction.interceptor";
 import { TenantContextMiddleware } from "./common/middleware/tenant-context.middleware";
 import { AuthModule } from "./auth/auth.module";
 import { TenantsModule } from "./tenants/tenants.module";
@@ -45,9 +46,14 @@ import { AuditModule } from "./audit/audit.module";
   providers: [
     TenantContextMiddleware,
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
-    // Order matters: Response is outermost (wraps everything sent to the
-    // client), Idempotency may short-circuit before the handler/Audit ever
-    // run, Audit is innermost so it observes the handler's real result.
+    // Order matters: Transaction is outermost so it commits/rolls back the
+    // request's connection (see TenantContextMiddleware) only after every
+    // other interceptor has finished using it — a client must never see a
+    // success response for a write that hasn't actually committed. Response
+    // wraps the client-facing shape, Idempotency may short-circuit before
+    // the handler/Audit ever run, Audit is innermost so it observes the
+    // handler's real result.
+    { provide: APP_INTERCEPTOR, useClass: TransactionInterceptor },
     { provide: APP_INTERCEPTOR, useClass: ResponseInterceptor },
     { provide: APP_INTERCEPTOR, useClass: IdempotencyInterceptor },
     { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },

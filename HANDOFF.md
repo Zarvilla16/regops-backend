@@ -1,8 +1,11 @@
 # RegOps Phase 0 — Handoff
 
-Written at the end of the initial scaffolding session. Read this before continuing work — it
-covers what exists, what was deliberately changed from the Backend Prompt 1 spec (and why), what's
-still unverified, and the exact steps a new session needs to get a working environment.
+Originally written at the end of the initial scaffolding session, when this sandbox had no Docker
+and nothing had run against a real database. **Updated after a follow-up session where Docker
+became available** — the full stack was actually run for the first time: migrations, seed, all 18
+e2e tests, and a manual walk through login → create tenant → create user → view audit logs via
+curl. That run surfaced several real, previously-invisible bugs (see below); all are now fixed and
+the fixes are verified, not just written. Read this before continuing work.
 
 ## What's been built
 
@@ -30,8 +33,100 @@ Full monorepo scaffold per the Prompt 1 spec:
 - **Tests**: `apps/api/test/{auth,tenant-isolation,audit}.e2e-spec.ts` plus one real unit test
   (`env.validation.spec.ts`) and a shared fixture helper (`test/utils/test-app.ts`).
 
-`pnpm lint`, `pnpm typecheck`, and `pnpm build` all pass clean across every package as of the end
-of this session.
+`pnpm lint`, `pnpm typecheck`, `pnpm build`, and `pnpm test` all pass clean across every package.
+**As of this session, `pnpm test:e2e` also passes clean — all 18 tests across
+`auth`/`tenant-isolation`/`audit` e2e specs, run against the real `docker-compose` Postgres.** A
+manual curl walkthrough of login → `POST /tenants` → `POST /users` (with `X-Tenant-Override`) →
+`GET /audit-logs` also succeeded end-to-end, confirming the literal Definition-of-Done acceptance
+path works.
+
+## Critical bugs found once Docker became available (all fixed)
+
+None of these were visible in the previous, Docker-less session — they only surface against a real
+Postgres. Roughly in the order they were found:
+
+1. **TypeORM's CLI entry point assumes an ESM project.** `typeorm/cli.js` loads the data source
+   file via dynamic `import()`, which follows Node ESM resolution rules (no extension-less
+   relative imports) even though this project is CommonJS. Fixed by pointing `migrate:run` /
+   `migrate:revert` / `migrate:generate` at `typeorm/cli-ts-node-commonjs.js` instead, and — since
+   that still hit a separate, flaky ts-node/type-checking interaction — by having those scripts
+   run `pnpm build` first and pass the **compiled** `dist/data-source.js` to the plain
+   `typeorm/cli.js` (a `.js` file needs no ESM/CJS detection). See `packages/db/package.json`.
+2. **A stale `apps/api/tsconfig.tsbuildinfo` made `tsc` silently emit nothing.** With
+   `"incremental": true`, deleting `dist/` without also deleting the buildinfo cache convinces
+   `tsc` the (now-gone) output is already up to date, so it exits 0 having written nothing.
+   Gitignored already; just remove it if a build ever produces an empty/missing `dist/`.
+3. **Port 5432 was already claimed by a native Windows PostgreSQL service** (`postgresql-x64-18`),
+   alongside Docker Desktop's own forwarding on the same port — host connections silently landed on
+   the native install (which has none of the `regops_admin`/`regops_app` roles), not the container.
+   Fixed by remapping `docker-compose.yml` to publish Postgres on host port **5433** and updating
+   every `DATABASE_URL`/`DATABASE_ADMIN_URL` in the `.env.example` files accordingly. This is a
+   local-environment fix, not a spec change — if you're on a machine without a conflicting native
+   Postgres, 5432 would have worked fine, but 5433 is now the checked-in default everywhere.
+4. **`apps/api/src/main.ts` called `bootstrap()` unconditionally at module scope.** e2e tests
+   import `configureApp` from this same file (by design, to reuse app setup), so merely importing
+   it also booted a second, real HTTP server on port 4000 — and with three e2e spec files running
+   in parallel Jest workers, they collided (`EADDRINUSE`). Fixed with a `require.main === module`
+   guard around the `bootstrap()` call.
+5. **The big one: `set_config(key, value, true)` outside of an explicit transaction doesn't
+   persist to the next query on the same connection.** The third argument (`is_local`) scopes the
+   setting to the current transaction; without one, each `queryRunner.query()` call is its own
+   autocommit statement, so `app.current_tenant_id`/`app.bypass_rls` were being discarded
+   immediately after the single `SET` statement that set them; every *later* query on that same
+   connection — every real read/write in the request — ran with RLS context unset, meaning
+   `tenant_id = NULL` (never true) silently filtered out every row. This affected essentially all
+   RLS-protected reads/writes application-wide, not just one endpoint. Fixed by wrapping the whole
+   unit of work in a real transaction:
+   - `TenantContextMiddleware` now opens the transaction right after `connect()`, before the `SET`.
+   - `AuthService.withBypassQueryRunner()` and `AuthService.refresh()` do the same.
+   - Per-service nested `startTransaction()`/`commitTransaction()` calls (e.g. `UsersService`) still
+     work unchanged — TypeORM correctly turns these into SAVEPOINTs when a transaction is already
+     active, so nothing about the existing atomic-write pattern needed to change.
+   - Committing had to move **out of** the middleware's `res.on("finish")` handler and **into** a
+     new `TransactionInterceptor` (registered as the outermost `APP_INTERCEPTOR`). `finish` fires
+     only after the response is already written to the client, so committing there would let a
+     caller see a 200 for a write that hadn't actually committed yet (and raced with test teardown
+     destroying the connection pool mid-commit). The interceptor commits inside the RxJS pipeline,
+     before Nest hands the response back to Express. The middleware's `res.on("finish")` still
+     exists, but now only as a safety-net rollback+release for the rare case a request never
+     reaches any interceptor at all (e.g. a path Express 404s with no matching controller).
+6. **A related Postgres quirk needed its own fix, independent of #5.** Even with transactions
+   fixed, `current_setting('app.current_tenant_id', true)` returns an **empty string**, not `NULL`,
+   on a connection where that custom GUC has ever been `SET LOCAL`'d before — even after that
+   transaction committed and ended. Since connections are pooled and reused across unrelated
+   requests, any request that doesn't set `current_tenant_id` at all (e.g. `AuthService.login`'s
+   bypass-only path) could reuse a connection previously touched by a tenant-scoped request, hit
+   `''::uuid`, and 500. Fixed with a new forward-only migration
+   (`1700000002000-FixTenantIsolationEmptyStringCast.ts`) that recreates the `tenant_isolation`
+   policy using `NULLIF(current_setting(...), '')::uuid` instead of a bare cast.
+7. **Refresh tokens could sign identically when issued in the same second.** JWT signing is
+   deterministic (HMAC) for identical header+payload+secret; two tokens for the same user with the
+   same claims and the same truncated-to-seconds `iat` produced byte-identical tokens, defeating
+   rotation/reuse-detection (both would hash the same). Fixed by adding a random `jti` claim to
+   every refresh token.
+8. **Audit atomicity vs. control flow conflict in `login()`/`verifyMfa()`.** Once
+   `withBypassQueryRunner` correctly rolled back on any thrown error (needed for genuine failures),
+   it also rolled back the deliberate `UnauthorizedException`/`LockedException` throws used for
+   *expected* auth failures — wiping out the very failed-attempt audit row / lockout counter update
+   those branches exist to persist. Fixed by having the transactional callback return a tagged
+   result (`{ outcome: "invalid" | "locked" | "mfa" | "success", ... }`) instead of throwing, so
+   the wrapper always commits normally; `login()`/`verifyMfa()` throw the actual HTTP exception
+   only after the commit has happened.
+9. **Two test bugs** (not app bugs): `tenant-isolation.e2e-spec.ts` and `audit.e2e-spec.ts` each
+   construct an ad-hoc raw `DataSource` with only `[UserEntity, ...]` to test RLS directly via raw
+   SQL — but `UserEntity` has a `@ManyToOne` relation to `TenantEntity`, which TypeORM needs
+   registered too in order to build the relation's metadata. Fixed by adding `TenantEntity` to both
+   entities arrays.
+10. **`apps/api`'s `dev` script (`nest start --watch`) raced its own compiler on cold start** —
+    intermittently `Error: Cannot find module '.../dist/main'` when the child process launched
+    before `nest-cli`'s watcher had finished writing that first compile to disk (more likely with
+    `deleteOutDir: true` in `nest-cli.json`, which removes `dist/` at the start of every rebuild).
+    Fixed by replacing the script with `tsc-watch -p tsconfig.json --onSuccess "node dist/main.js"`
+    (new devDependency): `tsc-watch` only runs the given command after a compile has actually
+    succeeded, on cold start and on every subsequent recompile, and kills/restarts it correctly on
+    each change — verified both a clean cold start and a hot-reload after editing `main.ts`.
+
+None of the original "Deviations from the spec" below were affected by this — they're unchanged.
 
 ## Deviations from the Backend Prompt 1 spec (and why)
 
@@ -109,23 +204,11 @@ of this session.
 
 ## Known issues / incomplete items
 
-- **The three e2e suites have never actually run against a live Postgres/Redis.** This sandbox
-  has no Docker. I confirmed the harness itself is structurally sound — booting the Nest app via
-  `Test.createTestingModule` and letting TypeORM attempt a real connection hit an ambient local
-  Postgres on this machine and failed cleanly with "password authentication failed for user
-  regops_app" (i.e. it reached and exercised real connection code, just against the wrong
-  server/role) — but **no assertion in `auth.e2e-spec.ts`, `tenant-isolation.e2e-spec.ts`, or
-  `audit.e2e-spec.ts` has actually been exercised.** Treat these as "should work, unverified" until
-  someone runs them against `docker-compose up`.
 - **No service-level unit tests** (`AuthService`, `UsersService`, `TenantsService`,
   `AuditService`, `MfaService`). Only `env.validation.spec.ts` exists as a real unit test; all
-  other coverage is e2e-only and therefore also unverified per the point above.
-- **`docker-compose up` has never been run.** `docker/postgres-init/01-roles.sql` only executes
-  on a **fresh** Postgres data volume (Postgres only runs `/docker-entrypoint-initdb.d` scripts
-  when the data directory is empty). If a stale `regops_postgres_data` volume from an earlier,
-  different attempt exists, the roles won't be (re)created and migrations will fail with a
-  role/permission error — first troubleshooting step if that happens is
-  `docker-compose down -v` and start clean.
+  other coverage is e2e-only. The e2e suite itself is now verified passing (see above), so this is
+  a coverage gap (no fast, DB-less regression signal for service logic), not an unverified-behavior
+  gap.
 - **Next.js build warns**: "The Next.js plugin was not detected in your ESLint configuration."
   `eslint-config-next` was never added; lint passes on the shared generic TS preset but doesn't
   get Next-specific rules (image/link usage, hooks rules, etc.). Not blocking, just weaker
@@ -134,60 +217,88 @@ of this session.
   instead of `tsconfig.json`. Cosmetic, non-blocking, never cleaned up.
 - **GitHub Actions CI has never actually run.** No remote configured, nothing pushed. The
   workflow is written and matrix-structured (lint/typecheck/test/build as separate jobs, each
-  reinstalling deps) but "green on first push" is unverified by construction.
-- **Nothing has been committed to git.** `git init` was run but every file is still untracked —
-  don't assume any commit history exists.
+  reinstalling deps); its Postgres service container stays on port 5432 (GitHub Actions runners
+  don't have the local port-5432 conflict described above), but "green on first push" is still
+  unverified since nothing has been pushed to a remote.
 - **Seed script's SUPER_ADMIN lives in an ad-hoc "RegOps Platform" tenant.** The schema requires
   every user to have a `tenant_id`, and the prompt doesn't specify what a platform-level admin's
   home tenant should be, so `seed.ts` creates one named `"RegOps Platform"` to hold it. This is a
   judgment call, not a spec requirement — revisit if product wants something else (e.g. a
   reserved sentinel tenant, or genuinely tenant-less super admins requiring a schema change).
+- **Per-app `.env` files are not committed** (correctly gitignored) and must be created locally —
+  `cp apps/api/.env.example apps/api/.env` etc. — before anything will run. A root-level `.env`
+  also exists in this working copy with the same values consolidated into one file, but it is
+  **not** read by any app at runtime (only referenced by `turbo.json`'s cache-invalidation
+  `globalDependencies`); don't confuse the two if you see both.
 
 ## What a new session needs to know to continue safely
 
-1. **Nothing is committed.** Check `git status` before assuming any baseline; the working tree
-   *is* the only copy of this work right now.
+1. **There is one commit** (`Initial scaffold per Backend prompt 1`); everything since — including
+   all the fixes in this handoff — is currently uncommitted working-tree changes (`git status`
+   shows the modified/new files). Check `git status` before assuming a clean baseline.
 2. **Bootstrap order matters**: `pnpm install` → copy the three `.env.example` files to `.env`
    (API needs `JWT_ACCESS_SECRET`/`JWT_REFRESH_SECRET`, each 64+ chars and *different* from each
    other — `validateEnv` throws otherwise) → `docker-compose up -d` → `pnpm build` (compiles
    `packages/shared`/`packages/db` to `dist/`, which the apps `require()` at runtime) →
-   `pnpm db:migrate` → `pnpm db:seed` → then `pnpm dev` works.
-3. **If you edit `packages/shared` or `packages/db` while `pnpm dev` is running**, the running
+   `pnpm db:migrate` → `pnpm db:seed` → then `pnpm dev` works. **This exact sequence has now been
+   run successfully end-to-end**, including a fresh `DROP SCHEMA public CASCADE` + re-migrate to
+   confirm it works from a genuinely clean database, not just an already-warm one.
+3. **If your host already runs a native PostgreSQL install, check for a port-5432 conflict**
+   before assuming `docker-compose`'s Postgres is the one you're actually talking to — see bug #3
+   above. Symptom is `password authentication failed for user regops_admin` even though the
+   password is correct: `netstat -ano | grep :5432` (or `Get-NetTCPConnection -LocalPort 5432` in
+   PowerShell) to check for a second listener. This repo's checked-in default is already remapped
+   to host port 5433; only relevant if you change it back or hit a similar conflict on a different
+   port.
+4. **If you edit `packages/shared` or `packages/db` while `pnpm dev` is running**, the running
    apps won't see the change until you rebuild (`pnpm build --filter @regops/shared --filter
    @regops/db`) — there's no watch-mode build wired up for those two packages yet.
-4. **Two Postgres roles matter and are easy to confuse**: the API always connects as
+5. **Two Postgres roles matter and are easy to confuse**: the API always connects as
    `regops_app` (no `BYPASSRLS` — this is what makes RLS real); migrations and seeds connect as
    `regops_admin` (`BYPASSRLS`). If you ever see rows silently missing where you expect them,
    check which `DATABASE_URL`/`DATABASE_ADMIN_URL` a script is using before suspecting the RLS
    policy logic itself.
-5. **Every tenant-scoped query in `apps/api` must go through the request's own `QueryRunner`**
+6. **Every tenant-scoped query in `apps/api` must go through the request's own `QueryRunner`**
    (`@CurrentQueryRunner()`), never a fresh injected repository from the connection pool — the
    pooled connection carries no `app.current_tenant_id` session var and RLS will silently return
    zero rows (or reject inserts). This is the single most important invariant in the codebase;
    read the doc comment on `TenantContextMiddleware` before adding any new tenant-scoped
    endpoint.
-6. **Before trusting anything in this handoff or in `README.md` as still-accurate**: this was
-   all written in one sitting with no live DB/Docker to check assumptions against. Re-verify
-   against the actual code before building Prompt 2 on top of it.
+7. **Any new code path that opens its own `QueryRunner` and calls `set_config(..., true)`
+   directly** (rather than going through `TenantContextMiddleware` or
+   `AuthService.withBypassQueryRunner`) **must wrap it in `startTransaction()`/`commitTransaction()`
+   /`rollbackTransaction()`.** This is exactly bug #5 above — `is_local = true` silently no-ops
+   outside of a transaction, and the failure mode (RLS filters out rows instead of erroring) is
+   easy to mistake for "no data yet" rather than a bug. If a `fn` passed to
+   `withBypassQueryRunner` needs to signal an *expected* failure (bad credentials, locked account,
+   etc.) without discarding writes already made in that same call (e.g. a failed-attempt audit
+   row), return a tagged result instead of throwing — see `login()`/`verifyMfa()` for the pattern
+   (bug #8 above); throwing there rolls back everything, including state you meant to keep.
+8. **The transaction opened per-request is committed by `TransactionInterceptor`** (registered as
+   the outermost `APP_INTERCEPTOR` in `app.module.ts`), not by the middleware that opens it. Commit
+   must happen before Nest hands the response to Express — see bug #5 above for why a
+   `res.on("finish")`-based commit is actively wrong (a client could see a success response for a
+   write that never committed).
 
-## Definition of Done — verified vs. not verified in this sandbox
+## Definition of Done — verified vs. not verified
 
 | # | Item | Status |
 |---|---|---|
-| 1 | `git clone` → `pnpm install` → `docker-compose up -d` → `pnpm db:migrate` → `pnpm db:seed` works with zero manual steps | ❌ Not verified — no Docker here. `pnpm install` itself verified working. |
-| 2 | `pnpm dev` starts api `:4000`, web `:3000`, worker `:4001` | ❌ Not verified — api/worker need a live DB to fully boot (TypeORM retries connecting before the app finishes bootstrapping) |
-| 3 | Seeded SUPER_ADMIN can log in via web UI and see the placeholder dashboard | ❌ Not verified — requires live DB |
-| 4 | Seeded TENANT_ADMIN can log in, enable MFA, log out, log in again with MFA | ❌ Not verified — requires live DB |
-| 5 | `pnpm lint && pnpm typecheck && pnpm test && pnpm test:e2e` all pass | ⚠️ Partial — `lint` ✅, `typecheck` ✅, `test` (unit) ✅, `test:e2e` ❌ (attempted; failed at DB auth against an ambient local Postgres instance, not the project's docker-compose Postgres — never actually exercised) |
-| 6 | All three integration test files present and passing | ⚠️ Partial — all three files exist and are structurally complete; "passing" unverified (see #5) |
+| 1 | `git clone` → `pnpm install` → `docker-compose up -d` → `pnpm db:migrate` → `pnpm db:seed` works with zero manual steps | ✅ Verified — run against a freshly-dropped-and-recreated schema, not just an already-migrated one |
+| 2 | `pnpm dev` starts api `:4000`, web `:3000`, worker `:4001` | ✅ Verified — ran `pnpm dev` (all three via turbo) concurrently; all three ports responded. Also caught and fixed a real cold-start race in `apps/api`'s dev script in the process (bug #10 above) |
+| 3 | Seeded SUPER_ADMIN can log in via web UI and see the placeholder dashboard | ⚠️ Partial — verified at the API level (login → `/auth/me` → tenant/user returned correctly) via curl; not re-verified by driving an actual browser against the Next.js UI in this session |
+| 4 | Seeded TENANT_ADMIN can log in, enable MFA, log out, log in again with MFA | ⚠️ Partial — non-MFA login/logout/refresh fully verified (e2e + manual curl); the MFA setup→enable→re-login-with-code loop is covered by `auth.e2e-spec.ts` (which now passes) but wasn't separately re-walked by hand |
+| 5 | `pnpm lint && pnpm typecheck && pnpm test && pnpm test:e2e` all pass | ✅ Verified — all four green, including all 18 e2e tests against the real docker-compose Postgres |
+| 6 | All three integration test files present and passing | ✅ Verified — `auth`, `tenant-isolation`, and `audit` e2e specs all pass |
 | 7 | GitHub Actions CI green on first push | ❌ Not verified — never pushed, no remote configured |
-| 8 | Swagger docs at `/docs` reachable in development | ❌ Not verified — requires the app to fully boot against a live DB |
-| 9 | README walks a new developer through setup in under 5 minutes | ✅ Written and internally consistent with the actual scripts/env vars; not literally timed with a fresh developer |
+| 8 | Swagger docs at `/docs` reachable in development | ✅ Verified — `curl` returned 200 against the running app |
+| 9 | README walks a new developer through setup in under 5 minutes | ✅ The exact documented command sequence was run start-to-finish this session and worked (port number updated to match the checked-in `docker-compose.yml`) |
 | 10 | No secrets in committed code; `.env.example` covers every required env var | ✅ Verified by review — all three `.env.example` files checked against their app's `env.validation`/`process.env` reads |
 
-**Bottom line**: everything that can be checked *without* a running Postgres/Redis (dependency
-graph, TypeScript types, lint rules, production build output, module resolution) has been
-checked and is green. Everything that requires a live database — which is most of the actual
-behavioral guarantees this phase exists to provide (RLS isolation, audit atomicity, auth flows)
-— is written but **unverified**. Running `docker-compose up -d && pnpm db:migrate && pnpm db:seed
-&& pnpm test:e2e` should be the first thing done in the next session with Docker available.
+**Bottom line**: the behavioral guarantees this phase exists to provide — RLS tenant isolation,
+audit atomicity, auth flows including MFA and refresh-token rotation/theft-detection — are no
+longer just written, they're passing against a real Postgres, and the full literal DoD path
+(clone → install → up → migrate → seed → login → create tenant → create user → see audit logs)
+has been walked end-to-end, with `pnpm dev` itself also verified running all three apps
+concurrently. What's left is genuinely just: driving the actual browser UI by hand (as opposed to
+the API directly), and pushing to a remote to get CI to run for real.

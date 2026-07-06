@@ -24,7 +24,7 @@ export const entities = [
  */
 const adminUrl =
   process.env.DATABASE_ADMIN_URL ??
-  "postgres://regops_admin:regops_admin_password@localhost:5432/regops";
+  "postgres://regops_admin:regops_admin_password@localhost:5433/regops";
 
 export const dataSourceOptions: DataSourceOptions = {
   type: "postgres",

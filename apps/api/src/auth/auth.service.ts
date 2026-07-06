@@ -52,12 +52,26 @@ export class AuthService {
     return crypto.createHash("sha256").update(token).digest("hex");
   }
 
+  // `set_config(..., true)` only survives for the life of a transaction —
+  // outside of one, Postgres discards it as soon as that single statement's
+  // implicit transaction ends, so a later query on this same connection
+  // would see it unset again. See TenantContextMiddleware for the full
+  // explanation of why this must be an explicit transaction rather than
+  // session-level (`is_local = false`).
   private async withBypassQueryRunner<T>(fn: (qr: QueryRunner) => Promise<T>): Promise<T> {
     const qr = this.dataSource.createQueryRunner();
     await qr.connect();
+    await qr.startTransaction();
     try {
       await qr.query(`SELECT set_config('app.bypass_rls', 'true', true)`);
-      return await fn(qr);
+      const result = await fn(qr);
+      await qr.commitTransaction();
+      return result;
+    } catch (err) {
+      if (qr.isTransactionActive) {
+        await qr.rollbackTransaction();
+      }
+      throw err;
     } finally {
       await qr.release();
     }
@@ -93,8 +107,11 @@ export class AuthService {
     replacesId?: string,
   ): Promise<string> {
     const refreshTtl = this.configService.get<string>("jwt.refreshTtl") ?? "30d";
+    // jti makes each token unique even when issued for the same user within
+    // the same second (same iat), which would otherwise sign identically and
+    // defeat rotation/reuse-detection (both tokens would hash the same).
     const token = this.jwtService.sign(
-      { sub: user.id, tenantId: user.tenantId, role: user.role },
+      { sub: user.id, tenantId: user.tenantId, role: user.role, jti: crypto.randomUUID() },
       { secret: this.configService.get<string>("jwt.refreshSecret"), expiresIn: refreshTtl },
     );
 
@@ -179,7 +196,14 @@ export class AuthService {
   }
 
   async login(email: string, password: string, meta: RequestMeta) {
-    return this.withBypassQueryRunner(async (qr) => {
+    // Failure branches below record state (a failed-attempt audit row, a
+    // lockout) that must survive even though the request ultimately 401s.
+    // withBypassQueryRunner rolls back on any thrown error — appropriate for
+    // a genuine system failure, wrong for "invalid credentials", which is
+    // expected control flow here. So this callback never throws for expected
+    // auth failures; it returns a tagged result and login() throws only
+    // after withBypassQueryRunner has committed it.
+    const result = await this.withBypassQueryRunner(async (qr) => {
       const repo = qr.manager.getRepository(UserEntity);
       const matches = await repo
         .createQueryBuilder("u")
@@ -190,28 +214,19 @@ export class AuthService {
         // Zero matches: unknown email. Multiple matches: email collides
         // across tenants, which this phase's email-only login cannot
         // disambiguate (see auth.service.ts login() comment / README).
-        throw new UnauthorizedException({
-          code: "INVALID_CREDENTIALS",
-          message: "Invalid email or password.",
-        });
+        return { outcome: "invalid" as const };
       }
 
       const user = matches[0];
 
       if (this.isLocked(user)) {
-        throw new LockedException({
-          code: "ACCOUNT_LOCKED",
-          message: "This account is temporarily locked due to too many failed login attempts.",
-        });
+        return { outcome: "locked" as const };
       }
 
       const passwordValid = await argon2.verify(user.passwordHash, password).catch(() => false);
       if (!passwordValid) {
         await this.recordFailedAttempt(qr, user, meta);
-        throw new UnauthorizedException({
-          code: "INVALID_CREDENTIALS",
-          message: "Invalid email or password.",
-        });
+        return { outcome: "invalid" as const };
       }
 
       await qr.manager
@@ -219,11 +234,30 @@ export class AuthService {
         .update({ id: user.id }, { failedLoginCount: 0 });
 
       if (user.mfaEnabled) {
-        return { mfaRequired: true, mfaToken: this.signMfaChallengeToken(user) };
+        return {
+          outcome: "mfa" as const,
+          data: { mfaRequired: true, mfaToken: this.signMfaChallengeToken(user) },
+        };
       }
 
-      return this.completeLogin(qr, user, meta);
+      return { outcome: "success" as const, data: await this.completeLogin(qr, user, meta) };
     });
+
+    switch (result.outcome) {
+      case "invalid":
+        throw new UnauthorizedException({
+          code: "INVALID_CREDENTIALS",
+          message: "Invalid email or password.",
+        });
+      case "locked":
+        throw new LockedException({
+          code: "ACCOUNT_LOCKED",
+          message: "This account is temporarily locked due to too many failed login attempts.",
+        });
+      case "mfa":
+      case "success":
+        return result.data;
+    }
   }
 
   async verifyMfa(mfaToken: string, code: string, meta: RequestMeta) {
@@ -242,12 +276,15 @@ export class AuthService {
       throw new UnauthorizedException({ code: "INVALID_MFA_TOKEN", message: "Invalid token." });
     }
 
-    return this.withBypassQueryRunner(async (qr) => {
+    // Same reasoning as login(): the failed-attempt audit row for an invalid
+    // MFA code must survive even though the request 401s, so this callback
+    // returns a tagged result instead of throwing (see login() comment).
+    const result = await this.withBypassQueryRunner(async (qr) => {
       const user = await qr.manager.getRepository(UserEntity).findOne({
         where: { id: payload.sub },
       });
       if (!user || !user.mfaSecret) {
-        throw new UnauthorizedException({ code: "INVALID_MFA_TOKEN", message: "Invalid token." });
+        return { outcome: "invalid_token" as const };
       }
 
       const secret = this.mfaService.decryptSecret(user.mfaSecret);
@@ -261,11 +298,20 @@ export class AuthService {
           ipAddress: meta.ipAddress,
           userAgent: meta.userAgent,
         });
-        throw new UnauthorizedException({ code: "INVALID_MFA_CODE", message: "Invalid code." });
+        return { outcome: "invalid_code" as const };
       }
 
-      return this.completeLogin(qr, user, meta);
+      return { outcome: "success" as const, data: await this.completeLogin(qr, user, meta) };
     });
+
+    switch (result.outcome) {
+      case "invalid_token":
+        throw new UnauthorizedException({ code: "INVALID_MFA_TOKEN", message: "Invalid token." });
+      case "invalid_code":
+        throw new UnauthorizedException({ code: "INVALID_MFA_CODE", message: "Invalid code." });
+      case "success":
+        return result.data;
+    }
   }
 
   private async completeLogin(qr: QueryRunner, user: UserEntity, meta: RequestMeta) {
@@ -322,17 +368,16 @@ export class AuthService {
       throw new UnauthorizedException({ code: "REFRESH_TOKEN_EXPIRED", message: "Refresh token expired." });
     }
 
-    const user = await this.dataSource
-      .getRepository(UserEntity)
-      .findOne({ where: { id: existing.userId } });
-    if (!user) {
-      throw new UnauthorizedException({ code: "INVALID_REFRESH_TOKEN", message: "Invalid refresh token." });
-    }
+    return this.withBypassQueryRunner(async (qr) => {
+      // Looked up here (under bypass_rls, inside withBypassQueryRunner's
+      // transaction) rather than via the plain injected repository above:
+      // the `user` table has RLS enabled, and a freshly-pooled connection
+      // with no tenant/bypass context set would have every row filtered out.
+      const user = await qr.manager.getRepository(UserEntity).findOne({ where: { id: existing.userId } });
+      if (!user) {
+        throw new UnauthorizedException({ code: "INVALID_REFRESH_TOKEN", message: "Invalid refresh token." });
+      }
 
-    const qr = this.dataSource.createQueryRunner();
-    await qr.connect();
-    try {
-      await qr.query(`SELECT set_config('app.bypass_rls', 'true', true)`);
       await qr.manager
         .getRepository(RefreshTokenEntity)
         .update({ id: existing.id }, { revokedAt: new Date() });
@@ -341,9 +386,7 @@ export class AuthService {
       const refreshToken = await this.issueRefreshToken(qr, user, meta, existing.id);
 
       return { accessToken, refreshToken };
-    } finally {
-      await qr.release();
-    }
+    });
   }
 
   async logout(refreshToken: string): Promise<void> {

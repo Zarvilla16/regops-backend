@@ -8,9 +8,9 @@
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.json",
-    "migrate:run": "ts-node -r tsconfig-paths/register ./node_modules/typeorm/cli.js -d src/data-source.ts migration:run",
-    "migrate:revert": "ts-node -r tsconfig-paths/register ./node_modules/typeorm/cli.js -d src/data-source.ts migration:revert",
-    "migrate:generate": "ts-node -r tsconfig-paths/register ./node_modules/typeorm/cli.js -d src/data-source.ts migration:generate",
+    "migrate:run": "pnpm build && node ./node_modules/typeorm/cli.js -d dist/data-source.js migration:run",
+    "migrate:revert": "pnpm build && node ./node_modules/typeorm/cli.js -d dist/data-source.js migration:revert",
+    "migrate:generate": "pnpm build && node ./node_modules/typeorm/cli.js -d dist/data-source.js migration:generate",
     "seed": "ts-node src/seed/seed.ts"
   },
   "dependencies": {

@@ -1,6 +1,6 @@
 import request from "supertest";
 import { DataSource } from "typeorm";
-import { AuditLogEntity, UserEntity } from "@regops/db";
+import { AuditLogEntity, TenantEntity, UserEntity } from "@regops/db";
 import { UserRole } from "@regops/shared";
 import {
   closeTestContext,
@@ -134,7 +134,7 @@ describe("Audit logging (e2e)", () => {
     const appDataSource = new DataSource({
       type: "postgres",
       url: process.env.DATABASE_URL,
-      entities: [UserEntity, AuditLogEntity],
+      entities: [UserEntity, AuditLogEntity, TenantEntity],
     });
     await appDataSource.initialize();
 

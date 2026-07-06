@@ -1,6 +1,6 @@
 import request from "supertest";
 import { DataSource } from "typeorm";
-import { UserEntity } from "@regops/db";
+import { TenantEntity, UserEntity } from "@regops/db";
 import { UserRole } from "@regops/shared";
 import {
   closeTestContext,
@@ -137,7 +137,7 @@ describe("Tenant isolation (e2e)", () => {
     const appDataSource = new DataSource({
       type: "postgres",
       url: process.env.DATABASE_URL,
-      entities: [UserEntity],
+      entities: [UserEntity, TenantEntity],
     });
     await appDataSource.initialize();
 

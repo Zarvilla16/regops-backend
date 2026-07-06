@@ -47,4 +47,10 @@ async function bootstrap(): Promise<void> {
   console.log(`RegOps API listening on port ${port}`);
 }
 
-bootstrap();
+if (require.main === module) {
+  bootstrap().catch((err) => {
+    console.error("API failed to start:", err);
+    process.exit(1);
+  });
+}
+
