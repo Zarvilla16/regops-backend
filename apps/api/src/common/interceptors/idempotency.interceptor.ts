@@ -8,7 +8,7 @@ import {
 import { Reflector } from "@nestjs/core";
 import * as crypto from "crypto";
 import { Observable, of } from "rxjs";
-import { tap } from "rxjs/operators";
+import { mergeMap } from "rxjs/operators";
 import { IdempotencyKeyEntity } from "@regops/db";
 import { IDEMPOTENT_KEY } from "../decorators/idempotent.decorator";
 
@@ -62,9 +62,15 @@ export class IdempotencyInterceptor implements NestInterceptor {
       return of(existing.responseBody);
     }
 
+    // mergeMap (not tap) so the insert is awaited before this Observable emits onward —
+    // TransactionInterceptor sits outside this one and commits/releases the connection
+    // as soon as it sees a value, so a fire-and-forget write here could still be in
+    // flight when that happens (or land on a connection already recycled to an
+    // unrelated request), the same race class fixed elsewhere for the request
+    // transaction itself — see TenantContextMiddleware's docblock.
     return next.handle().pipe(
-      tap((data) => {
-        void repo.save(
+      mergeMap(async (data) => {
+        await repo.save(
           repo.create({
             tenantId,
             key,
@@ -74,6 +80,7 @@ export class IdempotencyInterceptor implements NestInterceptor {
             expiresAt: new Date(Date.now() + IDEMPOTENCY_WINDOW_MS),
           }),
         );
+        return data;
       }),
     );
   }

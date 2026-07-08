@@ -31,3 +31,45 @@ export const MFA_MANDATORY_ROLES: readonly UserRole[] = [
   UserRole.TENANT_ADMIN,
   UserRole.COMPLIANCE_OFFICER,
 ];
+
+export enum CustomerType {
+  INDIVIDUAL = "INDIVIDUAL",
+  SME = "SME",
+  CORPORATE = "CORPORATE",
+  NGO = "NGO",
+  GOVERNMENT = "GOVERNMENT",
+  PEP = "PEP",
+}
+
+export enum CustomerStatus {
+  ACTIVE = "ACTIVE",
+  DORMANT = "DORMANT",
+  BLOCKED = "BLOCKED",
+  CLOSED = "CLOSED",
+}
+
+export enum RiskLevel {
+  LOW = "LOW",
+  MEDIUM = "MEDIUM",
+  HIGH = "HIGH",
+  CRITICAL = "CRITICAL",
+}
+
+/** What caused a risk score to be (re)calculated — recorded on every RiskScoreHistory row. */
+export enum ScoreTrigger {
+  INITIAL = "INITIAL",
+  SCHEDULED = "SCHEDULED",
+  MANUAL = "MANUAL",
+  SCREENING_MATCH = "SCREENING_MATCH",
+  CUSTOMER_UPDATED = "CUSTOMER_UPDATED",
+}
+
+/** Which discrete RiskFactor implementation a RiskFactorConfig row tunes. */
+export enum RiskFactorType {
+  CUSTOMER_TYPE = "CUSTOMER_TYPE",
+  OCCUPATION = "OCCUPATION",
+  COUNTRY = "COUNTRY",
+  PRODUCT_MIX = "PRODUCT_MIX",
+  TRANSACTION_VELOCITY = "TRANSACTION_VELOCITY",
+  KYC_TIER = "KYC_TIER",
+}

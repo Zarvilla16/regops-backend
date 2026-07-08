@@ -4,7 +4,9 @@ import * as argon2 from "argon2";
 import { AppDataSource } from "../data-source";
 import { TenantEntity } from "../entities/tenant.entity";
 import { UserEntity } from "../entities/user.entity";
+import { RiskFactorConfigEntity } from "../entities/risk-factor-config.entity";
 import { TenantStatus, TenantType, UserRole, UserStatus } from "@regops/shared";
+import { DEFAULT_RISK_FACTOR_CONFIGS } from "@regops/risk-engine";
 
 dotenv.config();
 
@@ -22,6 +24,24 @@ const ARGON2_OPTIONS: argon2.Options = {
 
 async function hash(password: string): Promise<string> {
   return argon2.hash(password, ARGON2_OPTIONS);
+}
+
+/** Idempotent — safe to re-run against a tenant that's already been seeded. */
+async function seedRiskFactorConfigs(tenantId: string): Promise<void> {
+  const repo = AppDataSource.getRepository(RiskFactorConfigEntity);
+  for (const defaults of DEFAULT_RISK_FACTOR_CONFIGS) {
+    const existing = await repo.findOne({ where: { tenantId, factorType: defaults.factorType } });
+    if (existing) continue;
+    await repo.save(
+      repo.create({
+        tenantId,
+        factorType: defaults.factorType,
+        weight: defaults.weight,
+        config: defaults.config,
+        isActive: true,
+      }),
+    );
+  }
 }
 
 /**
@@ -48,6 +68,7 @@ async function seed(): Promise<void> {
     );
     console.log(`Created platform tenant: ${platformTenant.id}`);
   }
+  await seedRiskFactorConfigs(platformTenant.id);
 
   let superAdmin = await userRepo.findOne({
     where: { tenantId: platformTenant.id, email: SUPER_ADMIN_EMAIL },
@@ -79,6 +100,7 @@ async function seed(): Promise<void> {
     );
     console.log(`Created demo tenant: ${demoTenant.id}`);
   }
+  await seedRiskFactorConfigs(demoTenant.id);
 
   const demoTenantAdminEmail = "admin@demomfb.dev";
   let tenantAdmin = await userRepo.findOne({

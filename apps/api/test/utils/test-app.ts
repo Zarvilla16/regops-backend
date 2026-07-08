@@ -11,8 +11,17 @@ import { INestApplication } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import * as argon2 from "argon2";
 import { DataSource } from "typeorm";
-import { AuditLogEntity, RefreshTokenEntity, TenantEntity, UserEntity } from "@regops/db";
+import {
+  AuditLogEntity,
+  CustomerEntity,
+  RefreshTokenEntity,
+  RiskFactorConfigEntity,
+  RiskScoreHistoryEntity,
+  TenantEntity,
+  UserEntity,
+} from "@regops/db";
 import { TenantStatus, TenantType, UserRole, UserStatus } from "@regops/shared";
+import { DEFAULT_RISK_FACTOR_CONFIGS } from "@regops/risk-engine";
 import { AppModule } from "../../src/app.module";
 import { configureApp } from "../../src/main";
 
@@ -44,7 +53,15 @@ export async function createTestContext(): Promise<TestContext> {
   const adminDataSource = new DataSource({
     type: "postgres",
     url: process.env.DATABASE_ADMIN_URL,
-    entities: [TenantEntity, UserEntity, RefreshTokenEntity, AuditLogEntity],
+    entities: [
+      TenantEntity,
+      UserEntity,
+      RefreshTokenEntity,
+      AuditLogEntity,
+      CustomerEntity,
+      RiskScoreHistoryEntity,
+      RiskFactorConfigEntity,
+    ],
   });
   await adminDataSource.initialize();
 
@@ -97,4 +114,26 @@ export async function createUserFixture(
   );
 
   return { user, password };
+}
+
+/**
+ * createTenantFixture is a raw insert (bypassing TenantsService.create()),
+ * so it doesn't get the default RiskFactorConfig rows real tenant creation
+ * seeds — call this too for any test that creates customers, or every
+ * factor silently no-ops (no config row => skipped) and every score comes
+ * back 0/LOW regardless of input.
+ */
+export async function seedRiskFactorConfigsFixture(ds: DataSource, tenantId: string): Promise<void> {
+  const repo = ds.getRepository(RiskFactorConfigEntity);
+  for (const defaults of DEFAULT_RISK_FACTOR_CONFIGS) {
+    await repo.save(
+      repo.create({
+        tenantId,
+        factorType: defaults.factorType,
+        weight: defaults.weight,
+        config: defaults.config,
+        isActive: true,
+      }),
+    );
+  }
 }

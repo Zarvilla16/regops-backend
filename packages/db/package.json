@@ -14,12 +14,13 @@
     "seed": "ts-node src/seed/seed.ts"
   },
   "dependencies": {
+    "@regops/risk-engine": "workspace:*",
     "@regops/shared": "workspace:*",
+    "argon2": "^0.41.1",
+    "dotenv": "^16.4.7",
     "pg": "^8.13.1",
     "reflect-metadata": "^0.2.2",
-    "typeorm": "^0.3.20",
-    "argon2": "^0.41.1",
-    "dotenv": "^16.4.7"
+    "typeorm": "^0.3.20"
   },
   "devDependencies": {
     "@regops/config": "workspace:*",

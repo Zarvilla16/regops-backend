@@ -1,7 +1,9 @@
 import { MiddlewareConsumer, Module, NestModule } from "@nestjs/common";
 import { ConfigModule, ConfigService } from "@nestjs/config";
 import { APP_FILTER, APP_INTERCEPTOR } from "@nestjs/core";
+import { EventEmitterModule } from "@nestjs/event-emitter";
 import { JwtModule } from "@nestjs/jwt";
+import { ScheduleModule } from "@nestjs/schedule";
 import { TypeOrmModule } from "@nestjs/typeorm";
 import { entities } from "@regops/db";
 import configuration from "./config/configuration";
@@ -16,6 +18,8 @@ import { AuthModule } from "./auth/auth.module";
 import { TenantsModule } from "./tenants/tenants.module";
 import { UsersModule } from "./users/users.module";
 import { AuditModule } from "./audit/audit.module";
+import { RiskModule } from "./risk/risk.module";
+import { CustomersModule } from "./customers/customers.module";
 
 @Module({
   imports: [
@@ -38,10 +42,14 @@ import { AuditModule } from "./audit/audit.module";
       }),
     }),
     JwtModule.register({}),
+    ScheduleModule.forRoot(),
+    EventEmitterModule.forRoot(),
     AuditModule,
     AuthModule,
     TenantsModule,
     UsersModule,
+    RiskModule,
+    CustomersModule,
   ],
   providers: [
     TenantContextMiddleware,

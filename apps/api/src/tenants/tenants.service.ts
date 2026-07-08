@@ -3,6 +3,7 @@ import { DataSource } from "typeorm";
 import { TenantEntity } from "@regops/db";
 import { AuthUserContext, TenantStatus } from "@regops/shared";
 import { AuditService } from "../audit/audit.service";
+import { RiskFactorConfigService } from "../risk/config/risk-factor-config.service";
 import { CreateTenantDto } from "./dto/create-tenant.dto";
 import { RequestMeta } from "../users/users.service";
 
@@ -11,6 +12,7 @@ export class TenantsService {
   constructor(
     private readonly dataSource: DataSource,
     private readonly auditService: AuditService,
+    private readonly riskFactorConfigService: RiskFactorConfigService,
   ) {}
 
   toDto(tenant: TenantEntity) {
@@ -60,6 +62,11 @@ export class TenantsService {
         `SELECT set_config('app.current_tenant_id', $1, true), set_config('app.bypass_rls', 'true', true)`,
         [tenant.id],
       );
+
+      // Every new tenant gets the default risk-scoring algorithm (section
+      // 5.5) — a tenant admin can tune weight/config afterward without any
+      // code change.
+      await this.riskFactorConfigService.seedDefaultsForTenant(queryRunner, tenant.id);
 
       await this.auditService.record(queryRunner, {
         tenantId: tenant.id,

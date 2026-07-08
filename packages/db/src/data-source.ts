@@ -6,6 +6,9 @@ import { UserEntity } from "./entities/user.entity";
 import { RefreshTokenEntity } from "./entities/refresh-token.entity";
 import { AuditLogEntity } from "./entities/audit-log.entity";
 import { IdempotencyKeyEntity } from "./entities/idempotency-key.entity";
+import { CustomerEntity } from "./entities/customer.entity";
+import { RiskScoreHistoryEntity } from "./entities/risk-score-history.entity";
+import { RiskFactorConfigEntity } from "./entities/risk-factor-config.entity";
 
 dotenv.config();
 
@@ -15,6 +18,9 @@ export const entities = [
   RefreshTokenEntity,
   AuditLogEntity,
   IdempotencyKeyEntity,
+  CustomerEntity,
+  RiskScoreHistoryEntity,
+  RiskFactorConfigEntity,
 ];
 
 /**

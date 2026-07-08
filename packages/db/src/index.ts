@@ -4,3 +4,6 @@ export * from "./entities/user.entity";
 export * from "./entities/refresh-token.entity";
 export * from "./entities/audit-log.entity";
 export * from "./entities/idempotency-key.entity";
+export * from "./entities/customer.entity";
+export * from "./entities/risk-score-history.entity";
+export * from "./entities/risk-factor-config.entity";
