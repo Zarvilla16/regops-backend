@@ -11,3 +11,4 @@ export * from "./entities/screening-provider-config.entity";
 export * from "./entities/screening-check.entity";
 export * from "./entities/screening-match.entity";
 export * from "./entities/internal-blacklist.entity";
+export * from "./entities/pep-details.entity";

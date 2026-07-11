@@ -101,6 +101,12 @@ export class CustomerEntity {
   })
   status!: CustomerStatus;
 
+  /** FileStorage key (e.g. "tenants/{tenantId}/customers/{id}/photo.jpg"), not a
+   * literal browsable URL — LocalFileStorage.getSignedDownloadUrl always returns
+   * null in local dev, so clients fetch the actual bytes via GET /customers/:id/photo. */
+  @Column({ name: "photo_url", type: "varchar", length: 500, nullable: true })
+  photoUrl!: string | null;
+
   @Column({ name: "onboarded_at", type: "timestamptz" })
   onboardedAt!: Date;
 

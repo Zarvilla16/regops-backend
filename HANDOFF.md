@@ -820,3 +820,202 @@ observation (same caveat Prompt 2 already carries), real-provider response-shape
 against actual Smile ID/Prembly sandboxes (no network access here), and the one
 intentionally-undecidable test case (fallback recovering where `MockProvider`-as-primary failed,
 for identical input).
+
+### Backend Prompt 3.5 (Customer module enhancements) adds
+
+Targeted enhancements to the Customer module requested from real client feedback after a demo —
+not a new module, four additions on top of the existing one:
+
+- **PEP details as a new entity, not new columns on `customer`** — `pep_details`
+  (`packages/db/src/entities/pep-details.entity.ts`, migration
+  `1700000030000-CustomerEnhancements.ts`), one-to-one with `customer` (`customer_id uuid NOT NULL
+  UNIQUE REFERENCES customer(id) ON DELETE CASCADE`), holding `pepCategory`
+  (`DOMESTIC`/`FOREIGN`/`INTERNATIONAL_ORG`, new `PepCategory` enum), `pepPosition`,
+  `pepInstitution`, `pepCountry`, `pepStatus` (`CURRENT`/`FORMER`, new `PepStatus` enum),
+  `pepStartDate`/`pepEndDate` (nullable — null means still current), `isPepByAssociation` +
+  `associatedPepName` (required together, enforced via `@ValidateIf` on
+  `CreatePepDetailsDto`), `sourceOfWealth`, `eddApprovedBy`/`eddApprovedAt` (populated later, by
+  approval), `nextReviewDate`. Same `tenant_isolation`/`super_admin_bypass` RLS pattern as every
+  other tenant-scoped table.
+- **Senior approval required to onboard a PEP customer** — a new `PENDING_EDD_APPROVAL`
+  `CustomerStatus` value. `CustomersService.create()` routes to it whenever `customerType ===
+  CustomerType.PEP` **or** the new optional `isPep: boolean` field on `CreateCustomerDto` is true
+  (covers a PEP whose `customerType` is otherwise `INDIVIDUAL`/`SME`/etc.) — either signal requires
+  a nested `pepDetails: CreatePepDetailsDto` (400 `PEP_DETAILS_REQUIRED` otherwise), and sets
+  `isPep: true` on the Customer row *before* `RiskService.calculateAndPersist()` runs, so the
+  existing PEP/sanctioned risk-score override applies to the customer's very first score, not a
+  later re-score. New `POST /customers/:id/approve-pep` (`TENANT_ADMIN`/`COMPLIANCE_OFFICER`,
+  idempotent): transitions `PENDING_EDD_APPROVAL` → `ACTIVE`, populates
+  `eddApprovedBy`/`eddApprovedAt` on the `pep_details` row, audits as `customer.pep_approved`. `GET
+  /customers?status=PENDING_EDD_APPROVAL` works with zero changes — `status` was already a
+  filterable field.
+- **Customer profile photo** — new nullable `photo_url` column on `customer`. `POST
+  /customers/:id/photo` (multipart, `TENANT_ADMIN`/`COMPLIANCE_OFFICER`, 5MB limit, `image/jpeg` |
+  `image/png` | `image/webp` | `image/gif` only) stores via the existing `FileStorage` interface
+  (`packages/file-storage` — never bypassed) under a `tenants/{tenantId}/customers/{id}/photo.{ext}`
+  key, same construction pattern `CustomerIngestionService` already uses for its own
+  `LocalFileStorage` instance (no NestJS DI token for `FileStorage` exists in this codebase). `DELETE
+  /customers/:id/photo` clears the reference. `GET /customers/:id/photo` (added beyond the spec's
+  two listed endpoints — see deviations) streams the bytes back with a content-type inferred from
+  the stored key's extension. Both upload and delete are audit-logged
+  (`customer.photo.upload`/`customer.photo.delete`).
+- **CSV export** — `GET /customers/export` reuses `list()`'s entire filter-building logic (extracted
+  into `buildFilteredCustomerQb()`, shared by both `list()` and `exportCsv()` — no duplicated filter
+  code), ignoring pagination so it returns every matching row, not one page. `bvn`/`nin` stay masked
+  (the same `toDto({ maskPii: true })` default `GET /customers` already uses) — no new unmasking path.
+  Same role-gating as `GET /customers`: no `@Roles()` restriction at all, any authenticated role.
+  Hand-rolled CSV writer (comma-join + quote-escaping), matching the only existing CSV-writing
+  precedent in the repo (`apps/worker`'s ingestion error-report) — no CSV library exists in this
+  monorepo today, so this was a genuine choice, not a "reuse what's there" situation (see deviations).
+
+### Critical bugs found while building the Customer module enhancements (all fixed)
+
+Continuing the numbering above.
+
+16. **Re-running this task's own e2e verification a second time caused every single test in every
+    e2e file — not just the new ones — to fail with a plain `401 Unauthorized` on login, including
+    tests that predate this prompt entirely (`auth.e2e-spec.ts`, `audit.e2e-spec.ts`). Fixed —
+    suite-wide, not scoped to this prompt.** Root-caused by direct SQL inspection rather than
+    assumed: `AuthService.login()`'s user lookup (`WHERE lower(u.email) = lower(:email)`) has no
+    tenant scoping at all — deliberate, since email-only login can't know which tenant a user
+    belongs to before it finds them (this exact tradeoff was already flagged as far back as Prompt
+    1's own deviation #4, framed there purely as a production-login limitation, not anticipated to
+    ever affect the test suite itself) — and returns `outcome: "invalid"` (401) whenever
+    `matches.length !== 1`, treating "email exists in two different tenants" identically to "email
+    doesn't exist." Every e2e spec file's test fixtures used **hardcoded, non-randomized emails**
+    (e.g. `admin-create-1@test.dev`) tied to a **freshly randomized tenant** each run
+    (`createTenantFixture` does randomize the tenant name/id, but nothing randomized the user's
+    email). Against this project's persistent dev Postgres (not an ephemeral per-run CI database), a
+    second invocation of any spec file recreated the exact same email under a new tenant id — one
+    duplicate was already enough to 401 every subsequent login using that email, cascading to
+    unrelated tests later in the same file/run. Confirmed directly: `SELECT email, COUNT(*) FROM
+    "user" WHERE email = 'admin-create-1@test.dev' GROUP BY email` returned 4 rows after repeated
+    runs during this session; `screening.e2e-spec.ts`'s author had already independently discovered
+    this exact danger and locally worked around it with a `uniqueEmail()` helper, but never
+    generalized the fix — every other spec file remained exposed.
+
+    **Real fix, not a workaround**: `createUserFixture` (`apps/api/test/utils/test-app.ts`) now
+    unconditionally appends a random nonce to whatever `email` override it's given
+    (`uniquifyEmail()`), so the literal a test passes in stays readable in failure traces while the
+    actually-persisted, actually-returned `user.email` is always globally unique — closing this for
+    every caller at once, since every test in the suite already logs in with the *returned*
+    `user.email`, not by reconstructing the literal. One file needed a companion fix:
+    `tenant-isolation.e2e-spec.ts` had ~5 places re-hardcoding literal emails directly in assertions
+    and one raw SQL query instead of reading the fixture's returned value — fixed to use the real
+    email throughout, including a cross-test dependency (one test's `tenantB-only` fixture, asserted
+    *absent* by the very next test) now threaded through a shared variable instead of a bare string
+    match. One more, unscoped-in-the-original-request instance of the same bug class was found and
+    fixed while editing that file: a `findOne({ where: { email: "new-hire@test.dev" } })` query (a
+    real user created via the actual `POST /users` signup path, not the fixture helper) had no
+    `tenantId` filter, so it could silently pick up a same-literal-email row from a different, stale
+    tenant left over by a prior run — scoped by `tenantId` too. `screening.e2e-spec.ts`'s
+    now-redundant local `uniqueEmail()` helper and its 3 call sites were removed in favor of the
+    shared fix.
+
+    **Proven, not just asserted**: `pnpm test:e2e` was run twice back-to-back at the repo root with
+    zero manual DB cleanup in between (previously, the second invocation alone was enough to
+    reproduce the full 401 cascade) — both runs passed clean, `apps/api` 75/75 both times. Directly
+    confirmed the actual mechanism, not just the symptom: after both runs, `SELECT email, COUNT(*)
+    FROM "user" GROUP BY email HAVING COUNT(*) > 1` still found 3 duplicate emails
+    (`new-hire@test.dev`, `audit-created@test.dev`, `audit-sensitive@test.dev`) — all three created
+    via the real signup API rather than `createUserFixture`, never logged into by any test, and
+    referenced only via their entity's own `id`/returned values rather than an ambiguous email
+    re-lookup (the `new-hire` case is the one already fixed above to scope by `tenantId`; the audit
+    two were never at risk in the first place, since neither test does a tenant-unscoped email
+    lookup). None of the three reproduce bug #16's actual failure mode — confirmed by the fact that
+    both full runs passed. This fix is suite-wide infrastructure (`test-app.ts`), not scoped to
+    Prompt 3.5 — every future prompt's e2e verification benefits from it.
+
+### Deviations from the Backend Prompt 3.5 spec (and why)
+
+1. **`FileStorage` (`packages/file-storage`) was not extended with a `delete()` method.** The
+   interface only has `upload`/`getReadStream`/`getSignedDownloadUrl` — `DELETE
+   /customers/:id/photo` clears `customer.photo_url` but can't remove the underlying stored bytes.
+   `packages/file-storage` isn't listed among this task's allowed touch points, so this is
+   deliberately left as a real, disclosed limitation rather than reached around (e.g. by calling
+   `fs.unlink` directly, which the spec explicitly forbids) or silently extended outside scope.
+2. **`GET /customers/:id/photo` was added, beyond the spec's two listed endpoints
+   (upload/delete).** `photoUrl` (Section 3's exact field name) stores a `FileStorage` key
+   (`tenants/{tenantId}/customers/{id}/photo.{ext}`), not a literal browsable URL —
+   `LocalFileStorage.getSignedDownloadUrl()` always returns `null` in local dev, so without a
+   download endpoint the stored value is unusable by any client and Section 5's explicit "photo
+   upload/delete round-trip" test requirement would have nothing to round-trip through. Minimal,
+   obviously-necessary complement, not scope creep.
+3. **Photo content-type is inferred from the stored key's file extension on download, not from a
+   separate DB column.** Section 3's field list doesn't include one; a small
+   extension-to-content-type map (`jpg`/`png`/`webp`/`gif`) covers the same 4 types the upload
+   endpoint itself validates against, so upload and download stay consistent without adding a column
+   the spec didn't ask for.
+4. **CSV export ignores `page`/`limit` entirely** — Section 4 says "accepts the same filter query
+   params as GET /customers," which covers the filters, not pagination; an export capped at one page
+   would defeat the point of exporting. `buildFilteredCustomerQb()` is shared, but only `list()`
+   calls `.skip()/.take()` on it.
+5. **CSV is hand-rolled (manual comma-join + quote-escaping), not written via a library.** Confirmed
+   by checking every `package.json` in the monorepo first: `csv-parse` (read-only) is installed in
+   `apps/api`/`apps/worker`, but no CSV-*writing* library exists anywhere — `apps/worker`'s ingestion
+   error-report (`ingestion-job.processor.ts`) is the only existing CSV-writing precedent, and it's
+   hand-rolled the same way. Matched that precedent for consistency rather than introducing a new
+   dependency for a small, already-solved problem.
+6. **`PATCH /customers/:id` gained two guards that weren't explicitly requested**: `status:
+   "PENDING_EDD_APPROVAL"` is rejected outright (400 `STATUS_NOT_DIRECTLY_SETTABLE` — that status is
+   system-managed, only `create()`'s PEP branch may set it, since a `pep_details` row is guaranteed
+   to exist alongside it), and any `status` change on an already-`PENDING_EDD_APPROVAL` customer is
+   rejected (409 `PEP_APPROVAL_REQUIRED` — forces the dedicated approval endpoint, so the
+   `customer.pep_approved` audit action and `eddApprovedBy`/`eddApprovedAt` population can't be
+   silently bypassed by a plain PATCH that happens to also touch `status`). Without these,
+   `UpdateCustomerDto`'s pre-existing (unrelated to this prompt) `status?: CustomerStatus` field
+   would have been a direct, obvious bypass of the senior-approval gate this prompt exists to build.
+7. **CSV batch ingestion (`apps/worker`) is untouched — a PEP customer imported via CSV does *not*
+   go through `PENDING_EDD_APPROVAL`.** Section 2's literal wording ("When creating a customer...")
+   and this task's scope both point at single-customer creation via `POST /customers`
+   (`CustomersService.create()`); CSV ingestion is a separate code path in a separate app with its
+   own duplicated customer-creation logic (no NestJS DI there — see Prompt 2's deviations), and
+   extending it wasn't asked for. Worth knowing before assuming PEP onboarding is gated everywhere a
+   `Customer` row can be created.
+8. **Updating an existing customer's `customerType` to `PEP` via `PATCH` also does not trigger
+   `PENDING_EDD_APPROVAL`.** Same literal-scope reasoning as #7 — the gate only fires at creation
+   time; `update()` wasn't extended to re-evaluate the PEP gate on a mid-lifecycle `customerType`
+   change, since the spec frames this entirely around onboarding.
+
+### Known issues / incomplete items (Backend Prompt 3.5)
+
+- **`GET /customers/export` has no query parameters declared in Swagger** (confirmed via
+  `/docs-json`: `parameters: []`) — the exact same class of gap Prompt 2's `GET /customers` and
+  Prompt 3's `GET /screening/checks`/`GET /screening/matches` already have. Filtering works
+  correctly (verified live and by e2e tests); it just can't be driven from typed Swagger fields.
+- **`POST /customers/:id/photo` has no file-upload field declared in Swagger** — no `requestBody`
+  appears in `/docs-json` for this operation at all, same root cause (`@nestjs/swagger` CLI plugin
+  not enabled) and same class of gap as Prompt 2's `POST /customers/batch` CSV upload.
+- **`CreateCustomerDto` (now including the new `isPep`/`pepDetails` fields) still renders as an
+  empty `{"type": "object", "properties": {}}` schema** — pre-existing gap, not introduced by this
+  prompt; the new fields simply inherit it, same as every other property on this DTO.
+- **No dedicated unit tests for the new service methods** (`approvePep`, `uploadPhoto`,
+  `deletePhoto`, `getPhotoStream`, `exportCsv`/`buildFilteredCustomerQb`) — coverage is e2e-only,
+  same pre-existing gap `CustomersService`'s other methods already have (see Prompt 1's Known
+  Issues).
+- ~~The e2e test suite's fixture-email/tenant-scoping fragility described in bug #16~~ — **fixed**,
+  see bug #16's updated entry above; no longer a known issue.
+
+### Definition of Done — Backend Prompt 3.5 — verified vs. not verified
+
+| # | Item | Status |
+|---|---|---|
+| 1 | `pep_details` entity + migration + RLS | ✅ Verified — migration applied cleanly against the live Postgres (`pnpm db:migrate`); RLS policies confirmed present via the same `tenant_isolation`/`super_admin_bypass` pattern as every other table |
+| 2 | PEP customer creation lands in `PENDING_EDD_APPROVAL`, requires `pepDetails`, both `customerType === PEP` and `isPep: true` signals covered | ✅ Verified — e2e tests plus a live `curl` walk against the demo tenant (`riskScore: 100, riskLevel: "CRITICAL", status: "PENDING_EDD_APPROVAL"` on the very first score, confirming the PEP override applies immediately) |
+| 3 | `POST /customers/:id/approve-pep` restricted to `TENANT_ADMIN`/`COMPLIANCE_OFFICER`, transitions correctly, audit-logged | ✅ Verified — e2e tests for both allowed roles, `VIEWER` 403, already-`ACTIVE` 409, plus a live `curl` walk confirming `eddApprovedBy`/`eddApprovedAt` population and the `customer.pep_approved` audit row |
+| 4 | `PENDING_EDD_APPROVAL` customers visible via `GET /customers`, `status` filterable | ✅ Verified — no DTO change needed (`status` was already validated against every `CustomerStatus` value); confirmed live and by e2e test |
+| 5 | Photo upload/delete via `FileStorage`, never bypassed | ✅ Verified — e2e round-trip test (upload → byte-for-byte download match → delete → 404) plus an independent live `curl` walk against the demo tenant; content-type restricted to 4 image types, 5MB limit |
+| 6 | CSV export reuses `GET /customers` filter logic, masks PII, role-gated identically | ✅ Verified — `buildFilteredCustomerQb()` shared by both, confirmed no duplicated filter code; e2e tests for filtering, masked `bvn`, and `VIEWER` access (no extra `@Roles` restriction); live `curl` walk confirmed `Content-Type: text/csv`/`Content-Disposition: attachment` |
+| 7 | `pnpm lint && pnpm typecheck && pnpm test && pnpm test:e2e`, run at the repo root, genuinely green | ✅ Verified — all four green in a single final pass (`apps/api` e2e: 75/75 across 7 suites; `apps/worker` e2e: 14/14 non-benchmark; `packages/risk-engine`: 64/64; `packages/screening-engine`: 40/40); further proven by running `pnpm test:e2e` twice back-to-back with zero manual DB cleanup between runs (75/75 both times) after fixing bug #16 at its root |
+| 8 | New e2e tests for all four areas | ✅ Verified — 21 new tests in `customers.e2e-spec.ts` (PEP creation/approval, photo, export) plus one pre-existing test in `risk-rescoring.e2e-spec.ts` fixed to account for the new PEP gate |
+| 9 | `docs/testing/prompt-3.5-swagger-test-guide.md`, claims verified against a live server | ✅ Verified — every step walked by hand against a live `node dist/main.js` on the seeded demo tenant before being written down, not inferred |
+
+**Bottom line**: all four requested enhancements work end-to-end against a real Postgres and a real
+`FileStorage`-backed local disk, confirmed twice — once by the e2e suite, once independently by
+hand through a live server. The one real surprise this prompt surfaced wasn't in the new code at
+all: a pre-existing e2e test-infrastructure fragility (bug #16) that had been silently accumulating
+duplicate-email debris in the shared dev database for days, eventually breaking login for every test
+in every file, unrelated to anything built here. Initially just cleaned up and documented as a
+deferred follow-up; on request, fixed properly at its root (`createUserFixture`, suite-wide) and
+proven to hold via two consecutive full `test:e2e` runs with no manual cleanup between them — no
+longer a known issue, and every future prompt's verification benefits from it, not just this one.

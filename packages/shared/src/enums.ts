@@ -46,6 +46,12 @@ export enum CustomerStatus {
   DORMANT = "DORMANT",
   BLOCKED = "BLOCKED",
   CLOSED = "CLOSED",
+  /** Set only by CustomersService.create() when the new customer is a PEP
+   * (Backend Prompt 3.5, Section 2) — the Customer row exists (so
+   * screening/audit can reference it) but isn't treated as fully onboarded
+   * until POST /customers/:id/approve-pep transitions it to ACTIVE. Not
+   * directly settable via PATCH /customers/:id — see CustomersService.update. */
+  PENDING_EDD_APPROVAL = "PENDING_EDD_APPROVAL",
 }
 
 export enum RiskLevel {
@@ -119,4 +125,20 @@ export enum MatchReviewStatus {
 export enum MatchDecision {
   TRUE_POSITIVE = "TRUE_POSITIVE",
   FALSE_POSITIVE = "FALSE_POSITIVE",
+}
+
+// --- Customer module enhancements (Backend Prompt 3.5) ---------------------
+
+export enum PepCategory {
+  DOMESTIC = "DOMESTIC",
+  FOREIGN = "FOREIGN",
+  INTERNATIONAL_ORG = "INTERNATIONAL_ORG",
+}
+
+/** null pepEndDate means still current — pepStatus is a separate, explicit
+ * field rather than derived from that, since a FORMER PEP's monitoring
+ * obligations (Section 1) don't reduce to "has an end date". */
+export enum PepStatus {
+  CURRENT = "CURRENT",
+  FORMER = "FORMER",
 }

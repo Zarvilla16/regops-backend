@@ -14,6 +14,7 @@ import { DataSource } from "typeorm";
 import {
   AuditLogEntity,
   CustomerEntity,
+  PepDetailsEntity,
   RefreshTokenEntity,
   RiskFactorConfigEntity,
   RiskScoreHistoryEntity,
@@ -67,6 +68,7 @@ export async function createTestContext(): Promise<TestContext> {
       ScreeningProviderConfigEntity,
       ScreeningCheckEntity,
       ScreeningMatchEntity,
+      PepDetailsEntity,
     ],
   });
   await adminDataSource.initialize();
@@ -94,6 +96,24 @@ export async function createTenantFixture(
   );
 }
 
+/** AuthService.login() matches by email alone across ALL tenants, with no
+ * tenant scoping (HANDOFF.md Prompt 1 deviation #4) — and this project's dev
+ * Postgres persists across e2e runs rather than resetting per invocation. A
+ * literal, un-suffixed email reused by a second run collides with a prior
+ * run's still-present fixture user in a different (stale) tenant, making the
+ * match ambiguous and 401ing every subsequent login using that email — this
+ * cascades to unrelated tests in the same run (see HANDOFF.md bug #16).
+ * Appending a random nonce here, unconditionally, closes this for every
+ * caller at once: the literal passed in stays readable in failure traces,
+ * but the actual persisted/returned `user.email` is always unique. Safe as
+ * long as callers log in with the *returned* `user.email`, not by
+ * reconstructing the literal they passed in — true everywhere in this suite. */
+function uniquifyEmail(email: string): string {
+  const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const at = email.indexOf("@");
+  return at === -1 ? `${email}-${nonce}` : `${email.slice(0, at)}-${nonce}${email.slice(at)}`;
+}
+
 export async function createUserFixture(
   ds: DataSource,
   tenantId: string,
@@ -103,11 +123,14 @@ export async function createUserFixture(
   const password = overrides.password ?? DEFAULT_TEST_PASSWORD;
   const passwordHash = await argon2.hash(password, ARGON2_OPTIONS);
 
+  const email = overrides.email
+    ? uniquifyEmail(overrides.email)
+    : `user-${Date.now()}-${Math.random().toString(36).slice(2)}@test.dev`;
+
   const user = await repo.save(
     repo.create({
       tenantId,
-      email:
-        overrides.email ?? `user-${Date.now()}-${Math.random().toString(36).slice(2)}@test.dev`,
+      email,
       passwordHash,
       fullName: overrides.fullName ?? "Test User",
       role: overrides.role ?? UserRole.VIEWER,

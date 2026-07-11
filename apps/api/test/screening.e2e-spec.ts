@@ -48,19 +48,12 @@ describe("Screening (e2e)", () => {
     return res.body.data.accessToken;
   }
 
-  // emailSuffix is for readability in failure traces only — a random
-  // component is still appended, since AuthService.login() matches by email
-  // alone across all tenants (HANDOFF.md deviation #4) and this file creates
-  // a fresh tenant per describe/it rather than per full suite run; a fixed
-  // literal email would collide with a prior run's still-present fixture
-  // user in a different (stale) tenant and make the match ambiguous.
-  function uniqueEmail(prefix: string): string {
-    return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@test.dev`;
-  }
-
+  // createUserFixture appends a random nonce to whatever email is passed in (see
+  // its own docblock / HANDOFF.md bug #16) — no local workaround needed here
+  // anymore; emailSuffix below is just for readability in failure traces.
   async function tenantAdminToken(tenantId: string, emailSuffix: string): Promise<string> {
     const { user, password } = await createUserFixture(ctx.adminDataSource, tenantId, {
-      email: uniqueEmail(`admin-scr-${emailSuffix}`),
+      email: `admin-scr-${emailSuffix}@test.dev`,
       role: UserRole.TENANT_ADMIN,
     });
     return loginAs(user.email, password);
@@ -68,7 +61,7 @@ describe("Screening (e2e)", () => {
 
   async function complianceToken(tenantId: string, emailSuffix: string): Promise<string> {
     const { user, password } = await createUserFixture(ctx.adminDataSource, tenantId, {
-      email: uniqueEmail(`compliance-scr-${emailSuffix}`),
+      email: `compliance-scr-${emailSuffix}@test.dev`,
       role: UserRole.COMPLIANCE_OFFICER,
     });
     return loginAs(user.email, password);
@@ -446,7 +439,7 @@ describe("Screening (e2e)", () => {
       const { match } = await seedPendingMatch(tenantAId, ScreeningCheckType.PEP, customerId);
 
       const { user, password } = await createUserFixture(ctx.adminDataSource, tenantAId, {
-        email: uniqueEmail("viewer-scr"),
+        email: "viewer-scr@test.dev",
         role: UserRole.VIEWER,
       });
       const viewerToken = await loginAs(user.email, password);

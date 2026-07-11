@@ -15,6 +15,10 @@ describe("Tenant isolation (e2e)", () => {
   let tenantAId: string;
   let tenantBId: string;
   let platformTenantId: string;
+  // Set by the "lets SUPER_ADMIN read across tenants..." test, read by the very next
+  // test ("restricts SUPER_ADMIN...") — both need to agree on the real (uniquified)
+  // email of the same tenantB-only fixture user; see createUserFixture's docblock.
+  let tenantBOnlyEmail: string;
 
   beforeAll(async () => {
     ctx = await createTestContext();
@@ -40,16 +44,22 @@ describe("Tenant isolation (e2e)", () => {
       tenantAId,
       { email: "tenantA-admin@test.dev", role: UserRole.TENANT_ADMIN },
     );
-    await createUserFixture(ctx.adminDataSource, tenantAId, { email: "tenantA-viewer@test.dev" });
-    await createUserFixture(ctx.adminDataSource, tenantBId, { email: "tenantB-viewer@test.dev" });
+    const { user: tenantAViewer } = await createUserFixture(ctx.adminDataSource, tenantAId, {
+      email: "tenantA-viewer@test.dev",
+    });
+    const { user: tenantBViewer } = await createUserFixture(ctx.adminDataSource, tenantBId, {
+      email: "tenantB-viewer@test.dev",
+    });
 
     const token = await loginAs(tenantAAdmin.email, password);
     const res = await http().get("/users").set("Authorization", `Bearer ${token}`).expect(200);
 
+    // Assert against the actual persisted (uniquified) emails, not the literals passed in —
+    // createUserFixture appends a random nonce to every email (see its own docblock / bug #16).
     const emails = res.body.data.map((u: { email: string }) => u.email);
-    expect(emails).toContain("tenantA-admin@test.dev");
-    expect(emails).toContain("tenantA-viewer@test.dev");
-    expect(emails).not.toContain("tenantB-viewer@test.dev");
+    expect(emails).toContain(tenantAAdmin.email);
+    expect(emails).toContain(tenantAViewer.email);
+    expect(emails).not.toContain(tenantBViewer.email);
   });
 
   it("returns 404 (not 403) when a tenant A user reads a tenant B user by id", async () => {
@@ -92,9 +102,14 @@ describe("Tenant isolation (e2e)", () => {
 
     expect(res.body.data.tenantId).toBe(tenantAId);
 
+    // Scoped by tenantId too, not just email — this user is created via the real
+    // POST /users path (not createUserFixture, so not auto-uniquified), and email
+    // uniqueness here is enforced per-tenant, not globally (same reasoning as bug
+    // #16): an un-scoped findOne could silently pick up a same-literal-email row
+    // from a different, stale tenant left over by a prior run of this same test.
     const created = await ctx.adminDataSource
       .getRepository(UserEntity)
-      .findOne({ where: { email: "new-hire@test.dev" } });
+      .findOne({ where: { email: "new-hire@test.dev", tenantId: tenantAId } });
     expect(created?.tenantId).toBe(tenantAId);
   });
 
@@ -104,7 +119,10 @@ describe("Tenant isolation (e2e)", () => {
       platformTenantId,
       { email: "super-admin@test.dev", role: UserRole.SUPER_ADMIN },
     );
-    await createUserFixture(ctx.adminDataSource, tenantBId, { email: "tenantB-only@test.dev" });
+    const { user: tenantBOnly } = await createUserFixture(ctx.adminDataSource, tenantBId, {
+      email: "tenantB-only@test.dev",
+    });
+    tenantBOnlyEmail = tenantBOnly.email;
 
     const token = await loginAs(superAdmin.email, password);
 
@@ -115,7 +133,7 @@ describe("Tenant isolation (e2e)", () => {
       .expect(200);
 
     const overrideEmails = overrideRes.body.data.map((u: { email: string }) => u.email);
-    expect(overrideEmails).toContain("tenantB-only@test.dev");
+    expect(overrideEmails).toContain(tenantBOnly.email);
   });
 
   it("restricts SUPER_ADMIN to their own primary tenant without the override header", async () => {
@@ -129,8 +147,11 @@ describe("Tenant isolation (e2e)", () => {
     const res = await http().get("/users").set("Authorization", `Bearer ${token}`).expect(200);
 
     const emails = res.body.data.map((u: { email: string }) => u.email);
-    expect(emails).toContain("super-admin-2@test.dev");
-    expect(emails).not.toContain("tenantB-only@test.dev");
+    expect(emails).toContain(superAdmin.email);
+    // Relies on the previous test's tenantBOnlyEmail — without reading the real
+    // (uniquified) value here, this assertion would trivially pass regardless of
+    // actual behavior, since the bare literal never matches any row post-uniquification.
+    expect(emails).not.toContain(tenantBOnlyEmail);
   });
 
   it("enforces RLS at the database level for direct SQL under the regops_app role", async () => {
@@ -142,7 +163,7 @@ describe("Tenant isolation (e2e)", () => {
     await appDataSource.initialize();
 
     try {
-      await createUserFixture(ctx.adminDataSource, tenantBId, {
+      const { user: rlsTarget } = await createUserFixture(ctx.adminDataSource, tenantBId, {
         email: "rls-direct-target@test.dev",
       });
 
@@ -154,9 +175,11 @@ describe("Tenant isolation (e2e)", () => {
           [tenantAId],
         );
 
-        const rows = await queryRunner.query(
-          `SELECT * FROM "user" WHERE email = 'rls-direct-target@test.dev'`,
-        );
+        // Parameterized on the real (uniquified) email, not the bare literal — otherwise
+        // this query would match zero rows regardless of whether RLS is actually working,
+        // since the literal no longer equals anything post-uniquification. That would make
+        // this assertion vacuously true rather than actually proving RLS hid the row.
+        const rows = await queryRunner.query(`SELECT * FROM "user" WHERE email = $1`, [rlsTarget.email]);
         expect(rows).toHaveLength(0);
       } finally {
         await queryRunner.release();

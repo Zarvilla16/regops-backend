@@ -3,6 +3,8 @@ import {
   CustomerType,
   MatchDecision,
   MatchReviewStatus,
+  PepCategory,
+  PepStatus,
   RiskFactorType,
   RiskLevel,
   ScoreTrigger,
@@ -105,7 +107,32 @@ export interface CustomerDto {
   isSanctioned: boolean;
   lastScreenedAt: string | null;
   status: CustomerStatus;
+  /** FileStorage key, not a literal browsable URL (LocalFileStorage.getSignedDownloadUrl
+   * always returns null in local dev) — fetch the actual bytes via GET /customers/:id/photo. */
+  photoUrl: string | null;
   onboardedAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One-to-one with Customer, only populated when isPep is true (Backend Prompt 3.5, Section 1). */
+export interface PepDetailsDto {
+  id: string;
+  customerId: string;
+  tenantId: string;
+  pepCategory: PepCategory;
+  pepPosition: string;
+  pepInstitution: string;
+  pepCountry: string;
+  pepStatus: PepStatus;
+  pepStartDate: string;
+  pepEndDate: string | null;
+  isPepByAssociation: boolean;
+  associatedPepName: string | null;
+  sourceOfWealth: string;
+  eddApprovedBy: string | null;
+  eddApprovedAt: string | null;
+  nextReviewDate: string;
   createdAt: string;
   updatedAt: string;
 }

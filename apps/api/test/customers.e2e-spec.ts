@@ -1,5 +1,5 @@
 import request from "supertest";
-import { CustomerEntity, RiskScoreHistoryEntity } from "@regops/db";
+import { CustomerEntity, PepDetailsEntity, RiskScoreHistoryEntity } from "@regops/db";
 import { UserRole } from "@regops/shared";
 import {
   closeTestContext,
@@ -46,6 +46,28 @@ describe("Customers (e2e)", () => {
       role: UserRole.TENANT_ADMIN,
     });
     return loginAs(user.email, password);
+  }
+
+  async function roleToken(tenantId: string, emailSuffix: string, role: UserRole): Promise<string> {
+    const { user, password } = await createUserFixture(ctx.adminDataSource, tenantId, {
+      email: `${role.toLowerCase()}-${emailSuffix}@test.dev`,
+      role,
+    });
+    return loginAs(user.email, password);
+  }
+
+  function validPepDetails(overrides: Record<string, unknown> = {}) {
+    return {
+      pepCategory: "DOMESTIC",
+      pepPosition: "Senator",
+      pepInstitution: "National Assembly",
+      pepCountry: "NG",
+      pepStatus: "CURRENT",
+      pepStartDate: "2020-01-01",
+      sourceOfWealth: "Salary and investments.",
+      nextReviewDate: "2027-01-01",
+      ...overrides,
+    };
   }
 
   describe("create", () => {
@@ -219,6 +241,16 @@ describe("Customers (e2e)", () => {
           country: "IR",
           kycTier: 1,
           onboardedAt: "2024-01-01",
+          pepDetails: {
+            pepCategory: "DOMESTIC",
+            pepPosition: "Senator",
+            pepInstitution: "National Assembly",
+            pepCountry: "IR",
+            pepStatus: "CURRENT",
+            pepStartDate: "2020-01-01",
+            sourceOfWealth: "Salary and investments.",
+            nextReviewDate: "2027-01-01",
+          },
         })
         .expect(201);
 
@@ -494,6 +526,480 @@ describe("Customers (e2e)", () => {
       );
       expect(auditRows).toHaveLength(1);
       expect(auditRows[0].after_state.reason).toBe("KYC refresh");
+    });
+  });
+
+  // --- Backend Prompt 3.5, Section 2: PEP onboarding + senior approval -------
+  describe("PEP creation and approval", () => {
+    it("creating a customerType PEP customer without pepDetails returns 400", async () => {
+      const token = await tenantAdminToken(tenantAId, "pep-1");
+
+      const res = await http()
+        .post("/customers")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          cbsCustomerId: "CUST-PEP-001",
+          fullName: "Missing Pep Details",
+          customerType: "PEP",
+          kycTier: 1,
+          onboardedAt: "2024-01-01",
+        })
+        .expect(400);
+
+      expect(res.body.error.code).toBe("PEP_DETAILS_REQUIRED");
+    });
+
+    it("customerType PEP with pepDetails lands in PENDING_EDD_APPROVAL, not ACTIVE, and creates a pep_details row", async () => {
+      const token = await tenantAdminToken(tenantAId, "pep-2");
+
+      // Name deliberately avoids the literal substring "PEP" — MockProvider upper-cases
+      // fullName and matches on it regardless of check type (see mock.provider.ts), so a
+      // name containing "PEP" would trigger a real synchronous SANCTIONS_MATCH_BLOCK here,
+      // unrelated to what this test is actually checking (same trap fixed in screening.e2e-spec.ts).
+      const res = await http()
+        .post("/customers")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          cbsCustomerId: "CUST-PEP-002",
+          fullName: "Pending Review Subject",
+          customerType: "PEP",
+          kycTier: 1,
+          onboardedAt: "2024-01-01",
+          pepDetails: validPepDetails(),
+        })
+        .expect(201);
+
+      expect(res.body.data.status).toBe("PENDING_EDD_APPROVAL");
+      expect(res.body.data.isPep).toBe(true);
+
+      const pepDetails = await ctx.adminDataSource
+        .getRepository(PepDetailsEntity)
+        .findOne({ where: { customerId: res.body.data.id } });
+      expect(pepDetails).not.toBeNull();
+      expect(pepDetails?.pepPosition).toBe("Senator");
+      expect(pepDetails?.eddApprovedBy).toBeNull();
+      expect(pepDetails?.eddApprovedAt).toBeNull();
+    });
+
+    it("an otherwise-INDIVIDUAL customer with isPep: true also lands in PENDING_EDD_APPROVAL (the 'or is_pep is being set true' signal)", async () => {
+      const token = await tenantAdminToken(tenantAId, "pep-3");
+
+      // Same MockProvider-trigger-avoidance reasoning as the test above.
+      const res = await http()
+        .post("/customers")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          cbsCustomerId: "CUST-PEP-003",
+          fullName: "Individual But Flagged",
+          customerType: "INDIVIDUAL",
+          isPep: true,
+          kycTier: 1,
+          onboardedAt: "2024-01-01",
+          pepDetails: validPepDetails(),
+        })
+        .expect(201);
+
+      expect(res.body.data.status).toBe("PENDING_EDD_APPROVAL");
+      expect(res.body.data.customerType).toBe("INDIVIDUAL");
+    });
+
+    it("isPepByAssociation: true without associatedPepName returns 400", async () => {
+      const token = await tenantAdminToken(tenantAId, "pep-4");
+
+      const res = await http()
+        .post("/customers")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          cbsCustomerId: "CUST-PEP-004",
+          fullName: "Associated Pep Missing Name",
+          customerType: "PEP",
+          kycTier: 1,
+          onboardedAt: "2024-01-01",
+          pepDetails: validPepDetails({ isPepByAssociation: true }),
+        })
+        .expect(400);
+
+      expect(res.body.success).toBe(false);
+    });
+
+    it("PATCHing status to PENDING_EDD_APPROVAL directly is rejected with 400 — system-managed only", async () => {
+      const token = await tenantAdminToken(tenantAId, "pep-5");
+
+      const created = await http()
+        .post("/customers")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          cbsCustomerId: "CUST-PEP-005",
+          fullName: "Active Customer",
+          customerType: "INDIVIDUAL",
+          kycTier: 1,
+          onboardedAt: "2024-01-01",
+        })
+        .expect(201);
+
+      const res = await http()
+        .patch(`/customers/${created.body.data.id}`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ status: "PENDING_EDD_APPROVAL" })
+        .expect(400);
+
+      expect(res.body.error.code).toBe("STATUS_NOT_DIRECTLY_SETTABLE");
+    });
+
+    it("PATCHing status on a PENDING_EDD_APPROVAL customer is rejected with 409 — must use approve-pep", async () => {
+      const token = await tenantAdminToken(tenantAId, "pep-6");
+
+      const created = await http()
+        .post("/customers")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          cbsCustomerId: "CUST-PEP-006",
+          fullName: "Pending Bypass Attempt",
+          customerType: "PEP",
+          kycTier: 1,
+          onboardedAt: "2024-01-01",
+          pepDetails: validPepDetails(),
+        })
+        .expect(201);
+
+      const res = await http()
+        .patch(`/customers/${created.body.data.id}`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ status: "ACTIVE" })
+        .expect(409);
+
+      expect(res.body.error.code).toBe("PEP_APPROVAL_REQUIRED");
+    });
+
+    it("TENANT_ADMIN approves a pending PEP customer: status -> ACTIVE, eddApprovedBy/eddApprovedAt populated, audit-logged", async () => {
+      const token = await tenantAdminToken(tenantAId, "pep-7");
+
+      const created = await http()
+        .post("/customers")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          cbsCustomerId: "CUST-PEP-007",
+          fullName: "Approve Me",
+          customerType: "PEP",
+          kycTier: 1,
+          onboardedAt: "2024-01-01",
+          pepDetails: validPepDetails(),
+        })
+        .expect(201);
+
+      const res = await http()
+        .post(`/customers/${created.body.data.id}/approve-pep`)
+        .set("Authorization", `Bearer ${token}`)
+        .expect(201);
+
+      expect(res.body.data.status).toBe("ACTIVE");
+
+      const pepDetails = await ctx.adminDataSource
+        .getRepository(PepDetailsEntity)
+        .findOneOrFail({ where: { customerId: created.body.data.id } });
+      expect(pepDetails.eddApprovedBy).not.toBeNull();
+      expect(pepDetails.eddApprovedAt).not.toBeNull();
+
+      const auditRows = await ctx.adminDataSource.query(
+        `SELECT action, after_state FROM audit_log WHERE entity_id = $1 AND action = 'customer.pep_approved'`,
+        [created.body.data.id],
+      );
+      expect(auditRows).toHaveLength(1);
+      expect(auditRows[0].after_state.status).toBe("ACTIVE");
+    });
+
+    it("COMPLIANCE_OFFICER can also approve", async () => {
+      const adminToken = await tenantAdminToken(tenantAId, "pep-8");
+      const complianceToken = await roleToken(tenantAId, "pep-8", UserRole.COMPLIANCE_OFFICER);
+
+      const created = await http()
+        .post("/customers")
+        .set("Authorization", `Bearer ${adminToken}`)
+        .send({
+          cbsCustomerId: "CUST-PEP-008",
+          fullName: "Compliance Approves",
+          customerType: "PEP",
+          kycTier: 1,
+          onboardedAt: "2024-01-01",
+          pepDetails: validPepDetails(),
+        })
+        .expect(201);
+
+      await http()
+        .post(`/customers/${created.body.data.id}/approve-pep`)
+        .set("Authorization", `Bearer ${complianceToken}`)
+        .expect(201);
+    });
+
+    it("VIEWER role cannot approve — 403", async () => {
+      const adminToken = await tenantAdminToken(tenantAId, "pep-9");
+      const viewerToken = await roleToken(tenantAId, "pep-9", UserRole.VIEWER);
+
+      const created = await http()
+        .post("/customers")
+        .set("Authorization", `Bearer ${adminToken}`)
+        .send({
+          cbsCustomerId: "CUST-PEP-009",
+          fullName: "Viewer Cannot Approve",
+          customerType: "PEP",
+          kycTier: 1,
+          onboardedAt: "2024-01-01",
+          pepDetails: validPepDetails(),
+        })
+        .expect(201);
+
+      await http()
+        .post(`/customers/${created.body.data.id}/approve-pep`)
+        .set("Authorization", `Bearer ${viewerToken}`)
+        .expect(403);
+    });
+
+    it("approving an already-ACTIVE customer returns 409", async () => {
+      const token = await tenantAdminToken(tenantAId, "pep-10");
+
+      const created = await http()
+        .post("/customers")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          cbsCustomerId: "CUST-PEP-010",
+          fullName: "Already Active",
+          customerType: "INDIVIDUAL",
+          kycTier: 1,
+          onboardedAt: "2024-01-01",
+        })
+        .expect(201);
+
+      const res = await http()
+        .post(`/customers/${created.body.data.id}/approve-pep`)
+        .set("Authorization", `Bearer ${token}`)
+        .expect(409);
+
+      expect(res.body.error.code).toBe("CUSTOMER_NOT_PENDING_EDD_APPROVAL");
+    });
+
+    it("GET /customers?status=PENDING_EDD_APPROVAL filters to only pending customers", async () => {
+      const token = await tenantAdminToken(tenantAId, "pep-11");
+
+      const created = await http()
+        .post("/customers")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          cbsCustomerId: "CUST-PEP-011",
+          fullName: "Visible While Pending",
+          customerType: "PEP",
+          kycTier: 1,
+          onboardedAt: "2024-01-01",
+          pepDetails: validPepDetails(),
+        })
+        .expect(201);
+
+      const res = await http()
+        .get("/customers?status=PENDING_EDD_APPROVAL")
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+
+      const ids = res.body.data.data.map((c: { id: string }) => c.id);
+      expect(ids).toContain(created.body.data.id);
+      for (const c of res.body.data.data as { status: string }[]) {
+        expect(c.status).toBe("PENDING_EDD_APPROVAL");
+      }
+    });
+  });
+
+  // --- Backend Prompt 3.5, Section 3: profile photo ---------------------------
+  describe("photo", () => {
+    it("uploads a photo, round-trips through FileStorage, then deletes it (404 afterward)", async () => {
+      const token = await tenantAdminToken(tenantAId, "photo-1");
+
+      const created = await http()
+        .post("/customers")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          cbsCustomerId: "CUST-PHOTO-001",
+          fullName: "Photo Subject",
+          customerType: "INDIVIDUAL",
+          kycTier: 1,
+          onboardedAt: "2024-01-01",
+        })
+        .expect(201);
+      const id = created.body.data.id;
+
+      const fakeImageBytes = Buffer.from("fake-png-bytes-for-testing-only");
+
+      const uploadRes = await http()
+        .post(`/customers/${id}/photo`)
+        .set("Authorization", `Bearer ${token}`)
+        .attach("file", fakeImageBytes, { filename: "photo.png", contentType: "image/png" })
+        .expect(201);
+
+      expect(uploadRes.body.data.photoUrl).not.toBeNull();
+      expect(uploadRes.body.data.photoUrl).toContain(id);
+
+      // .buffer()/.parse() force a raw Buffer body regardless of content-type — the streamed
+      // response has no content-length header at all (chunked transfer), so this is the only
+      // reliable way to verify the actual round-tripped bytes, not just the status/headers.
+      const downloadRes = await http()
+        .get(`/customers/${id}/photo`)
+        .set("Authorization", `Bearer ${token}`)
+        .buffer()
+        .parse((res, callback) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () => callback(null, Buffer.concat(chunks)));
+        })
+        .expect(200);
+      expect(downloadRes.headers["content-type"]).toBe("image/png");
+      expect(Buffer.isBuffer(downloadRes.body)).toBe(true);
+      expect((downloadRes.body as Buffer).equals(fakeImageBytes)).toBe(true);
+
+      const auditAfterUpload = await ctx.adminDataSource.query(
+        `SELECT action FROM audit_log WHERE entity_id = $1 AND action = 'customer.photo.upload'`,
+        [id],
+      );
+      expect(auditAfterUpload).toHaveLength(1);
+
+      await http().delete(`/customers/${id}/photo`).set("Authorization", `Bearer ${token}`).expect(204);
+
+      const stored = await ctx.adminDataSource.getRepository(CustomerEntity).findOneOrFail({ where: { id } });
+      expect(stored.photoUrl).toBeNull();
+
+      await http().get(`/customers/${id}/photo`).set("Authorization", `Bearer ${token}`).expect(404);
+
+      const auditAfterDelete = await ctx.adminDataSource.query(
+        `SELECT action FROM audit_log WHERE entity_id = $1 AND action = 'customer.photo.delete'`,
+        [id],
+      );
+      expect(auditAfterDelete).toHaveLength(1);
+    });
+
+    it("rejects an unsupported content type with 400", async () => {
+      const token = await tenantAdminToken(tenantAId, "photo-2");
+
+      const created = await http()
+        .post("/customers")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          cbsCustomerId: "CUST-PHOTO-002",
+          fullName: "Bad Content Type",
+          customerType: "INDIVIDUAL",
+          kycTier: 1,
+          onboardedAt: "2024-01-01",
+        })
+        .expect(201);
+
+      const res = await http()
+        .post(`/customers/${created.body.data.id}/photo`)
+        .set("Authorization", `Bearer ${token}`)
+        .attach("file", Buffer.from("not-an-image"), { filename: "notes.txt", contentType: "text/plain" })
+        .expect(400);
+
+      expect(res.body.error.code).toBe("UNSUPPORTED_PHOTO_TYPE");
+    });
+
+    it("deleting a photo that doesn't exist returns 404", async () => {
+      const token = await tenantAdminToken(tenantAId, "photo-3");
+
+      const created = await http()
+        .post("/customers")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          cbsCustomerId: "CUST-PHOTO-003",
+          fullName: "No Photo Yet",
+          customerType: "INDIVIDUAL",
+          kycTier: 1,
+          onboardedAt: "2024-01-01",
+        })
+        .expect(201);
+
+      await http()
+        .delete(`/customers/${created.body.data.id}/photo`)
+        .set("Authorization", `Bearer ${token}`)
+        .expect(404);
+    });
+  });
+
+  // --- Backend Prompt 3.5, Section 4: CSV export -------------------------------
+  describe("export", () => {
+    it("returns a CSV with the correct content-type/content-disposition, masked PII, and respects filters", async () => {
+      const token = await tenantAdminToken(tenantAId, "export-1");
+
+      await http()
+        .post("/customers")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          cbsCustomerId: "CUST-EXPORT-001",
+          fullName: "Export Included",
+          bvn: "55566677788",
+          customerType: "SME",
+          kycTier: 1,
+          onboardedAt: "2024-01-01",
+        })
+        .expect(201);
+
+      await http()
+        .post("/customers")
+        .set("Authorization", `Bearer ${token}`)
+        .send({
+          cbsCustomerId: "CUST-EXPORT-002",
+          fullName: "Export Excluded",
+          customerType: "CORPORATE",
+          kycTier: 1,
+          onboardedAt: "2024-01-01",
+        })
+        .expect(201);
+
+      const res = await http()
+        .get("/customers/export?customer_type=SME")
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+
+      expect(res.headers["content-type"]).toContain("text/csv");
+      expect(res.headers["content-disposition"]).toContain("attachment");
+
+      const body = res.text;
+      expect(body).toContain("Export Included");
+      expect(body).not.toContain("Export Excluded");
+      expect(body).toContain("*******7788"); // masked bvn, never the plaintext
+      expect(body).not.toContain("55566677788");
+    });
+
+    it("is accessible to VIEWER, same role-gating as GET /customers (no @Roles restriction)", async () => {
+      const adminToken = await tenantAdminToken(tenantAId, "export-2");
+      const viewerToken = await roleToken(tenantAId, "export-2", UserRole.VIEWER);
+
+      await http()
+        .post("/customers")
+        .set("Authorization", `Bearer ${adminToken}`)
+        .send({
+          cbsCustomerId: "CUST-EXPORT-003",
+          fullName: "Viewer Export Check",
+          customerType: "INDIVIDUAL",
+          kycTier: 1,
+          onboardedAt: "2024-01-01",
+        })
+        .expect(201);
+
+      await http().get("/customers/export").set("Authorization", `Bearer ${viewerToken}`).expect(200);
+    });
+
+    it("respects tenant isolation — tenant B's export never contains tenant A's customers", async () => {
+      const tokenA = await tenantAdminToken(tenantAId, "export-4a");
+      const tokenB = await tenantAdminToken(tenantBId, "export-4b");
+
+      await http()
+        .post("/customers")
+        .set("Authorization", `Bearer ${tokenA}`)
+        .send({
+          cbsCustomerId: "CUST-EXPORT-005",
+          fullName: "Tenant A Export Only",
+          customerType: "INDIVIDUAL",
+          kycTier: 1,
+          onboardedAt: "2024-01-01",
+        })
+        .expect(201);
+
+      const res = await http().get("/customers/export").set("Authorization", `Bearer ${tokenB}`).expect(200);
+      expect(res.text).not.toContain("Tenant A Export Only");
     });
   });
 });

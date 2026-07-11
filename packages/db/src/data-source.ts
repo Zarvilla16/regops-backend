@@ -13,6 +13,7 @@ import { ScreeningProviderConfigEntity } from "./entities/screening-provider-con
 import { ScreeningCheckEntity } from "./entities/screening-check.entity";
 import { ScreeningMatchEntity } from "./entities/screening-match.entity";
 import { InternalBlacklistEntity } from "./entities/internal-blacklist.entity";
+import { PepDetailsEntity } from "./entities/pep-details.entity";
 
 dotenv.config();
 
@@ -29,6 +30,7 @@ export const entities = [
   ScreeningCheckEntity,
   ScreeningMatchEntity,
   InternalBlacklistEntity,
+  PepDetailsEntity,
 ];
 
 /**

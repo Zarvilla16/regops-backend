@@ -79,7 +79,26 @@ describe("Risk re-scoring (e2e)", () => {
   it("scheduled re-score (triggered directly here, same as the daily cron would) writes calculated_by=NULL", async () => {
     const { token } = await complianceOfficerToken("scheduled-1");
     // HIGH via PEP override so it's picked up by the "HIGH/CRITICAL" scheduled query.
-    const customer = await createCustomer(token, { customerType: "PEP", country: "IR" });
+    // Backend Prompt 3.5: a PEP customerType now requires pepDetails and starts life as
+    // PENDING_EDD_APPROVAL, not ACTIVE — rescoreTenantCustomers only sweeps ACTIVE customers
+    // (see rescore-scheduler.service.ts), so this test approves it first to preserve its
+    // actual intent (a HIGH/CRITICAL customer gets swept by the scheduled cron), not to test
+    // the approval gate itself.
+    const customer = await createCustomer(token, {
+      customerType: "PEP",
+      country: "IR",
+      pepDetails: {
+        pepCategory: "FOREIGN",
+        pepPosition: "Minister",
+        pepInstitution: "Ministry of Finance",
+        pepCountry: "IR",
+        pepStatus: "CURRENT",
+        pepStartDate: "2020-01-01",
+        sourceOfWealth: "Government salary.",
+        nextReviewDate: "2027-01-01",
+      },
+    });
+    await http().post(`/customers/${customer.id}/approve-pep`).set("Authorization", `Bearer ${token}`).expect(201);
 
     // Calls the same private per-tenant method the daily @Cron handler uses, scoped to just this
     // test's tenant — calling the public dailyRescoreHighRisk() directly would sweep every ACTIVE
