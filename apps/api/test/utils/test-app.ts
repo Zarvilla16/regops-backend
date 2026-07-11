@@ -17,10 +17,13 @@ import {
   RefreshTokenEntity,
   RiskFactorConfigEntity,
   RiskScoreHistoryEntity,
+  ScreeningCheckEntity,
+  ScreeningMatchEntity,
+  ScreeningProviderConfigEntity,
   TenantEntity,
   UserEntity,
 } from "@regops/db";
-import { TenantStatus, TenantType, UserRole, UserStatus } from "@regops/shared";
+import { ScreeningCheckType, ScreeningProviderName, TenantStatus, TenantType, UserRole, UserStatus } from "@regops/shared";
 import { DEFAULT_RISK_FACTOR_CONFIGS } from "@regops/risk-engine";
 import { AppModule } from "../../src/app.module";
 import { configureApp } from "../../src/main";
@@ -61,6 +64,9 @@ export async function createTestContext(): Promise<TestContext> {
       CustomerEntity,
       RiskScoreHistoryEntity,
       RiskFactorConfigEntity,
+      ScreeningProviderConfigEntity,
+      ScreeningCheckEntity,
+      ScreeningMatchEntity,
     ],
   });
   await adminDataSource.initialize();
@@ -135,5 +141,54 @@ export async function seedRiskFactorConfigsFixture(ds: DataSource, tenantId: str
         isActive: true,
       }),
     );
+  }
+}
+
+/**
+ * Same reasoning as seedRiskFactorConfigsFixture above — createTenantFixture
+ * bypasses TenantsService.create(), so it doesn't get the default
+ * ScreeningProviderConfig rows real tenant creation seeds. Defaults to
+ * MockProvider as primary for every check type (no fallback) — deterministic
+ * and network-free, matching Section 7.3's "CI never calls Smile ID or
+ * Prembly". Pass `overrides` to configure a fallback for retry/fallback
+ * tests.
+ */
+export async function seedScreeningProviderConfigsFixture(
+  ds: DataSource,
+  tenantId: string,
+  overrides?: Partial<Record<ScreeningCheckType, { fallback?: ScreeningProviderName }>>,
+): Promise<void> {
+  const repo = ds.getRepository(ScreeningProviderConfigEntity);
+  const checkTypes = [ScreeningCheckType.SANCTIONS, ScreeningCheckType.PEP, ScreeningCheckType.ADVERSE_MEDIA];
+
+  for (const checkType of checkTypes) {
+    await repo.save(
+      repo.create({
+        tenantId,
+        checkType,
+        provider: ScreeningProviderName.MOCK,
+        isPrimary: true,
+        isFallback: false,
+        credentialsRef: "env://MOCK_PROVIDER_UNUSED",
+        config: {},
+        isActive: true,
+      }),
+    );
+
+    const fallbackProvider = overrides?.[checkType]?.fallback;
+    if (fallbackProvider) {
+      await repo.save(
+        repo.create({
+          tenantId,
+          checkType,
+          provider: fallbackProvider,
+          isPrimary: false,
+          isFallback: true,
+          credentialsRef: `env://${fallbackProvider}_UNUSED`,
+          config: {},
+          isActive: true,
+        }),
+      );
+    }
   }
 }

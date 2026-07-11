@@ -9,6 +9,10 @@ import { IdempotencyKeyEntity } from "./entities/idempotency-key.entity";
 import { CustomerEntity } from "./entities/customer.entity";
 import { RiskScoreHistoryEntity } from "./entities/risk-score-history.entity";
 import { RiskFactorConfigEntity } from "./entities/risk-factor-config.entity";
+import { ScreeningProviderConfigEntity } from "./entities/screening-provider-config.entity";
+import { ScreeningCheckEntity } from "./entities/screening-check.entity";
+import { ScreeningMatchEntity } from "./entities/screening-match.entity";
+import { InternalBlacklistEntity } from "./entities/internal-blacklist.entity";
 
 dotenv.config();
 
@@ -21,6 +25,10 @@ export const entities = [
   CustomerEntity,
   RiskScoreHistoryEntity,
   RiskFactorConfigEntity,
+  ScreeningProviderConfigEntity,
+  ScreeningCheckEntity,
+  ScreeningMatchEntity,
+  InternalBlacklistEntity,
 ];
 
 /**

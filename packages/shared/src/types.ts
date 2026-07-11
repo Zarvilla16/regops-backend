@@ -1,9 +1,16 @@
 import {
   CustomerStatus,
   CustomerType,
+  MatchDecision,
+  MatchReviewStatus,
   RiskFactorType,
   RiskLevel,
   ScoreTrigger,
+  ScreeningCheckStatus,
+  ScreeningCheckType,
+  ScreeningProviderName,
+  ScreeningResultType,
+  ScreeningTrigger,
   TenantStatus,
   TenantType,
   UserRole,
@@ -136,4 +143,70 @@ export interface BatchIngestJobStatusDto {
   succeeded: number | null;
   failed: number | null;
   errorReportUrl: string | null;
+}
+
+// --- Screening (Backend Prompt 3) ------------------------------------------
+
+export interface ScreeningCheckDto {
+  id: string;
+  tenantId: string;
+  customerId: string | null;
+  checkType: ScreeningCheckType;
+  provider: ScreeningProviderName;
+  inputData: Record<string, unknown>;
+  status: ScreeningCheckStatus;
+  result: ScreeningResultType | null;
+  highestMatchScore: number | null;
+  providerReference: string | null;
+  rawResponse: unknown;
+  errorMessage: string | null;
+  latencyMs: number | null;
+  trigger: ScreeningTrigger;
+  triggeredBy: string | null;
+  startedAt: string;
+  completedAt: string | null;
+}
+
+export interface ScreeningMatchDto {
+  id: string;
+  tenantId: string;
+  screeningCheckId: string;
+  /** Denormalized from the parent ScreeningCheck at read time — a reviewer
+   * needs to know at a glance whether this is a SANCTIONS/PEP/ADVERSE_MEDIA
+   * hit, not just an opaque screeningCheckId to resolve separately. */
+  checkType: ScreeningCheckType;
+  /** Nullable, matching ScreeningCheckDto.customerId's precedent: the
+   * synchronous sanctions pre-screen at onboarding (Section 5.1) runs before
+   * a Customer row exists, so a match tied to a blocked attempt genuinely
+   * has no customer to reference — never coerce this to "" (an invalid,
+   * misleading stand-in for "no customer"). */
+  customerId: string | null;
+  listSource: string;
+  matchName: string;
+  matchScore: number;
+  matchData: Record<string, unknown>;
+  reviewStatus: MatchReviewStatus;
+  decision: MatchDecision | null;
+  decisionReason: string | null;
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+  createdAt: string;
+}
+
+/**
+ * credentialsRef/config are deliberately NOT part of this wire DTO — a
+ * provider's vault/env secret reference should never round-trip to a client,
+ * even a TENANT_ADMIN one (see Section 7.4's "never plaintext" instruction,
+ * extended here to "never even the ref, to any client").
+ */
+export interface ScreeningProviderConfigDto {
+  id: string;
+  tenantId: string;
+  provider: ScreeningProviderName;
+  checkType: ScreeningCheckType;
+  isPrimary: boolean;
+  isFallback: boolean;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
 }

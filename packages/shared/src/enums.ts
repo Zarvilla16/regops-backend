@@ -73,3 +73,50 @@ export enum RiskFactorType {
   TRANSACTION_VELOCITY = "TRANSACTION_VELOCITY",
   KYC_TIER = "KYC_TIER",
 }
+
+// --- Screening (Backend Prompt 3) ------------------------------------------
+
+export enum ScreeningProviderName {
+  SMILE_ID = "SMILE_ID",
+  PREMBLY = "PREMBLY",
+  MOCK = "MOCK",
+}
+
+export enum ScreeningCheckType {
+  SANCTIONS = "SANCTIONS",
+  PEP = "PEP",
+  ADVERSE_MEDIA = "ADVERSE_MEDIA",
+}
+
+export enum ScreeningCheckStatus {
+  PENDING = "PENDING",
+  COMPLETED = "COMPLETED",
+  FAILED = "FAILED",
+  TIMEOUT = "TIMEOUT",
+}
+
+/** Named ScreeningResultType (not just "ScreeningResult") since that name is
+ * reserved for the richer provider-call return shape in screening-engine. */
+export enum ScreeningResultType {
+  CLEAN = "CLEAN",
+  POTENTIAL_MATCH = "POTENTIAL_MATCH",
+  CONFIRMED_MATCH = "CONFIRMED_MATCH",
+  ERROR = "ERROR",
+}
+
+export enum ScreeningTrigger {
+  ONBOARDING = "ONBOARDING",
+  SCHEDULED = "SCHEDULED",
+  MANUAL = "MANUAL",
+  UPDATE = "UPDATE",
+}
+
+export enum MatchReviewStatus {
+  PENDING_REVIEW = "PENDING_REVIEW",
+  REVIEWED = "REVIEWED",
+}
+
+export enum MatchDecision {
+  TRUE_POSITIVE = "TRUE_POSITIVE",
+  FALSE_POSITIVE = "FALSE_POSITIVE",
+}

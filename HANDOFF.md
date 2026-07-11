@@ -16,6 +16,16 @@ tests in `packages/risk-engine` (100% coverage) and 46 e2e tests across `apps/ap
 list below. Three real bugs were found this session, one of them in Prompt-1-era code that had
 been sitting undisturbed until this module's tests exercised it hard enough to expose it.
 
+**Update — Backend Prompt 3 (Screening module) is now complete.** Built on top of Prompts 1-2 with
+no changes to their guarantees — `customer.is_pep`/`is_sanctioned`/`last_screened_at` (added in
+Prompt 2, previously unused) are now genuinely written by this module. New workspace package
+`packages/screening-engine` (framework-free, mirrors `packages/risk-engine`'s split) plus a new
+`apps/api/src/screening` module, two new `apps/worker` BullMQ processors, and a new migration.
+`pnpm lint && pnpm typecheck && pnpm test` pass clean across all 9 workspace packages (the new
+`@regops/screening-engine` added); `apps/api`'s e2e suite is up to 56 (from 46) and `apps/worker`'s
+is up to 14 (from 3, excluding the gated benchmark). See the new sections below for what's built,
+deviations, and honestly-flagged gaps.
+
 ## What's been built
 
 Full monorepo scaffold per the Prompt 1 spec:
@@ -515,3 +525,298 @@ silently lose rows on partial failure, and the 100k-row performance target — a
 a real Postgres, not just written. What's left is genuinely just: watching the actual cron
 schedules fire in real time (as opposed to calling the same code directly), and a more systematic
 audit-action-by-action cross-check against the spec's exact list.
+
+### Backend Prompt 3 (Screening module) adds
+
+- **`packages/screening-engine`** (new package, framework-free — same split rationale as
+  `packages/risk-engine`): `ScreeningProvider` interface, `MockProvider` (deterministic per the
+  spec's fullName-substring table — `SANCTIONED`/`POSSIBLY_SANCTIONED`/`PEP`/`TIMEOUT_TEST`/
+  `CRASH_TEST`), `SmileIdProvider`/`PremblyProvider` (native `fetch` + `AbortController`, no HTTP
+  client dependency — real endpoint shapes are a best-effort mapping per the spec's own wording,
+  since this sandbox has no network access to the real Smile ID/Prembly sandboxes to verify
+  against), threshold banding (`bandScore`/`bandHighestScore`, tenant-overridable via
+  `Tenant.config["screening.thresholds"]`), `computeInputHash` (dedup), and `screenWithFallback`
+  (retry-then-fallback orchestration, retry schedule injectable so tests don't sleep for real
+  seconds). 40 unit tests, ~97% coverage (the two intentionally-uncovered gaps are the real
+  `setTimeout`-based default retry delay and each real provider's placeholder `healthCheck`).
+- **`packages/shared`**: `ScreeningProviderName`/`ScreeningCheckType`/`ScreeningCheckStatus`/
+  `ScreeningResultType`/`ScreeningTrigger`/`MatchReviewStatus`/`MatchDecision` enums;
+  `ScreeningCheckDto`/`ScreeningMatchDto`/`ScreeningProviderConfigDto` wire types (the config DTO
+  deliberately omits `credentialsRef`/`config` — never round-tripped to any client, not even
+  TENANT_ADMIN); `ASYNC_SCREENING_QUEUE`/`RESCREEN_QUEUE` queue names; `screening.ts`
+  (`AsyncScreeningJobData/Result`, `RescreenJobData/Result` — shared job shapes between the
+  `apps/api` producer and `apps/worker` consumer, same convention as `ingestion.ts`).
+- **`packages/db`**: `ScreeningProviderConfigEntity`, `ScreeningCheckEntity`, `ScreeningMatchEntity`,
+  `InternalBlacklistEntity`; migration `1700000020000-Screening.ts` (all four tables, the spec's
+  indexes including the partial-unique one-primary-per-check-type index and the pg_trgm GIN index
+  on `internal_blacklist.full_name`, same RLS enable/force + policy pattern as every earlier
+  migration). Applied and reverted cleanly against the live Postgres multiple times, including from
+  a genuinely empty schema alongside all four earlier migrations.
+- **`apps/api/src/screening`**: `ScreeningService` (the core engine — dedup, internal blacklist
+  first, provider-registry resolve + retry/fallback, persists `ScreeningCheck`/`ScreeningMatch`),
+  `screenSync` (the onboarding sanctions block — throws 422/503, see the design-decision writeup
+  below), `screenExistingCustomerSanctions` (the on-demand re-check endpoint — never blocks, only
+  auto-flags), `MatchReviewService` (review decision logic, flag-setting, re-score), controllers for
+  both, `ProviderRegistry`/`ScreeningProviderConfigService`/`InternalBlacklistProvider`/
+  `SecretsService` (env:// working, vault:// a documented stub), `AsyncScreeningQueueService`/
+  `RescreenQueueService` (BullMQ producer + `QueueEvents` bridge, exact mirror of
+  `CustomerIngestionService`'s existing pattern — re-emits `EventEmitter2` events once the worker's
+  job actually completes), `RescreenSchedulerService` (3 cron jobs, enqueue-only), `CustomerListener`
+  (`@OnEvent("customer.updated")` → async re-screen when a screening-relevant field changes). Wired
+  into `CustomersService.create()` per the spec's exact pseudocode shape, and into
+  `TenantsService.create()` for default provider-config seeding.
+- **`apps/worker`**: `async-screening.processor.ts` (PEP/adverse-media for new customers) and
+  `rescreen-job.processor.ts` (scheduled re-screen), each with their own duplicated
+  `screening-check-runner.ts`/`apply-confirmed-match.ts` glue — same "no NestJS DI here, so the
+  provider-resolution/internal-blacklist/risk-rescore logic gets its own worker-side copy" reasoning
+  `ingestion-job.processor.ts` already established for risk scoring.
+- **`packages/db/src/seed/seed.ts`**: seeds `MockProvider` as primary for all three check types for
+  both the platform and demo tenants, idempotently (safe to re-run).
+- **Tests**: `packages/screening-engine` — 7 spec files, 40 tests. `apps/api/test/screening.e2e-spec.ts`
+  — 13 tests (sync block, fail-closed, match review incl. audit/event assertions, tenant isolation,
+  the two previously-easy-to-forget direct endpoints `GET /screening/checks(/:id)` and
+  `POST /screening/customers/:id/sanctions`). `apps/worker/test/screening.e2e-spec.ts` — 11 tests
+  (async PEP flow, internal blacklist short-circuit incl. an expiry case, scheduled re-screen incl.
+  dedup). Every existing fixture-creating e2e spec that calls `POST /customers`
+  (`customers.e2e-spec.ts`, `risk-rescoring.e2e-spec.ts`) now also calls the new
+  `seedScreeningProviderConfigsFixture` test helper — omitting it makes every customer-creation call
+  500 (`ProviderRegistry`: no primary provider configured), exactly as it would in a real
+  under-provisioned tenant.
+
+#### The critical design decision, implemented as specified
+
+Section 2.1's synchronous/asynchronous asymmetry is real, not just written: `screenSync` runs on
+its **own dedicated database connection** (`ScreeningService.withDedicatedTenantContext`, same
+pattern as `RescoreSchedulerService.withTenantContext`), separate from the ambient per-request
+transaction `TenantContextMiddleware`/`TransactionInterceptor` manage. This is what makes the
+resulting `screening_check`/`screening_match`/`customer.create.blocked` audit rows survive even
+though the request as a whole throws a 422 and its own ambient transaction gets rolled back —
+discovered by writing the naive version first (same connection as the rest of the request) and
+watching the audit trail vanish on a 422, then fixing it the same way this codebase's own bug #8
+(`AuthService.login()`) already did: give the write its own commit boundary, independent of
+whatever the caller does with the exception afterward.
+
+**Re-confirmed a second way, independent of the automated suite**: beyond `screening.e2e-spec.ts`,
+this exact behavior was walked by hand against a live `node dist/main.js` + `node dist/main.js`
+(api + worker) pair on the seeded demo tenant, via raw `curl` (see
+`docs/testing/prompt-3-swagger-test-guide.md` for the click-by-click version of the same walk):
+- `fullName: "John SANCTIONED Doe"` → `422 SANCTIONS_MATCH_BLOCK`, no `Customer` row, exact response
+  body confirmed to omit `listSource`/`matchName` from `error.details`.
+- `fullName: "TIMEOUT_TEST Ltd"` → `503 SCREENING_PROVIDER_UNAVAILABLE`, no `Customer` row — on the
+  demo tenant's actual seeded provider config (`MOCK` primary, no fallback), no special setup
+  needed to trigger fail-closed.
+- `fullName: "Wale POSSIBLY_SANCTIONED Balogun"` → `201`, customer created, and — this is a real,
+  worth-knowing quirk of `MockProvider`'s design — **all three checks (SANCTIONS, PEP,
+  ADVERSE_MEDIA) evaluate the same `fullName` through the identical substring rules regardless of
+  `checkType`** (`MockProvider.screen()` never reads its `checkType` parameter). Concretely: any
+  name that would auto-flag PEP (contains `"PEP"`) *also* returns `CONFIRMED_MATCH` on the
+  synchronous SANCTIONS pre-screen, which blocks onboarding before the async PEP job could ever be
+  enqueued — so a customer that successfully reaches the async PEP-confirmed-and-flagged state via
+  `MockProvider` cannot exist. What *is* demonstrable, and was verified live: a `POTENTIAL_MATCH`
+  name creates the customer normally, and within ~200ms (worker already running) three
+  `PENDING_REVIEW` `ScreeningMatch` rows appear — one per check type, same score/list source, since
+  `MockProvider` can't tell them apart — after which reviewing the PEP one as `TRUE_POSITIVE` does
+  flip `isPep: true` and `riskLevel: CRITICAL` for real. Not a bug; a documented limitation of the
+  mock's checkType-blind design, worth knowing before assuming any arbitrary "CONFIRMED_MATCH"
+  scenario is reachable through every code path.
+
+## Critical bugs found while building the Screening module (all fixed)
+
+Continuing the numbering above — this surfaced during a live post-handoff review of Backend Prompt 3.
+
+15. **`MatchReviewService.applyTruePositive` flipped `isSanctioned`/`isPep`, re-scored the customer,
+    and emitted a `customer.sanctions_confirmed`/`customer.pep_confirmed` `EventEmitter2` event — but
+    never wrote an `audit_log` row for any of it.** Only the review decision itself
+    (`screening.match.reviewed`) was audited; the resulting customer state change wasn't, violating
+    Section 4.1's "every state change is audit-logged" principle. Caught by a live manual test:
+    reviewing a `PEP` match `TRUE_POSITIVE` correctly flipped `isPep`/`riskLevel` on
+    `GET /customers/{id}`, but `GET /audit-logs` showed no corresponding entry anywhere. Confirmed as
+    a genuine gap, not a query-side miss, by comparing against the automated equivalent —
+    `apps/worker/src/screening/apply-confirmed-match.ts`, which already writes a dedicated
+    `customer.sanctions_flagged`/`customer.pep_flagged` audit row for the identical kind of change —
+    so the human-reviewed path was the one actually missing its half. Fixed by adding an
+    `auditService.record` call at the end of `applyTruePositive`, using `customer.sanctions_confirmed`/
+    `customer.pep_confirmed` as the action (mirroring the existing event names 1:1, so the
+    human-reviewed and automated paths stay independently visible in the trail, same reasoning
+    `RiskService`'s `rescoreManual`/`rescoreScheduled` already established), with real
+    `ipAddress`/`userAgent` threaded through from the request. Verified with a live re-test against
+    the running dev server (not just the e2e suite): created a customer with a `POSSIBLY_SANCTIONED`
+    name, reviewed its `PEP` match `TRUE_POSITIVE`, and confirmed `GET /audit-logs` now returns a
+    `customer.pep_confirmed` row with `afterState: { isPep: true, riskLevel: "CRITICAL", ... }` and
+    real `ipAddress`/`userAgent` values. Also added regression coverage:
+    `screening.e2e-spec.ts`'s existing SANCTIONS `TRUE_POSITIVE` test now asserts the `audit_log` row
+    directly (it previously only checked the in-process event), and a new equivalent `PEP` test was
+    added alongside it. Writing that PEP test surfaced a related trap worth noting: `MockProvider`
+    upper-cases `fullName` before matching its triggers, so a test customer literally named with
+    `"PEP"` in it would trigger a real, automated `CONFIRMED_MATCH` during that customer's own async
+    onboarding screen, racing the test's manually-seeded pending match — avoided by choosing a name
+    with no trigger substring, same precaution the pre-existing tests in this file already took for
+    `SANCTIONED` (`"TP Sanctions Subject"`, not literally `"SANCTIONED"`).
+
+### Deviations from the Backend Prompt 3 spec (and why)
+
+1. **`InternalBlacklistProvider` does not implement the shared `ScreeningProvider` interface.** The
+   interface's `screen(checkType, input, config)` has no `QueryRunner` parameter, but the internal
+   blacklist genuinely needs tenant-scoped DB access (BVN/NIN exact match, trigram fuzzy name
+   match) that an external provider's `config: Record<string, unknown>` blob has no room for. It's
+   resolved by direct injection in `ScreeningService`/duplicated as a plain function in
+   `apps/worker`, never through `ProviderRegistry.resolve()`'s interchangeable primary/fallback
+   mechanism — matching the spec's own framing of it as "hard-wired," not one of the swappable
+   providers.
+2. **`screening_match.customer_id` is nullable**, deviating from the spec's literal (unannotated,
+   so presumptively NOT NULL) schema. Section 10.3's own test requires a `ScreeningMatch` row to
+   exist for the blocked-onboarding scenario, where by construction there is no customer to
+   reference yet — the same reasoning `screening_check.customer_id` (explicitly nullable in the
+   spec) already rests on.
+3. **Retry schedule is `[1000ms, 4000ms]` (3 total primary attempts) by default**, reconciling
+   Section 4.5's literal text ("retry primary once with exponential backoff (1s, then 4s)") against
+   Section 10.2's terser "retried once... second failure, fallback called" test description — read
+   as validating the retry-then-fallback *mechanism* with whatever schedule is configured, not
+   literally capping production behavior at 2 attempts. `screenWithFallback`'s retry delays are
+   injectable specifically so tests can exercise both the full production schedule and a
+   fast/short one without real multi-second sleeps.
+4. **Section 10.4's "with fallback: same input → fallback used, customer created if fallback CLEAN"
+   is not literally tested.** `MockProvider`'s behavior is a pure function of `fullName` only, with
+   no notion of "which slot (primary/fallback) is calling me" — so a fallback also configured as
+   `MOCK` behaves identically to the failing primary for the same input, and a real HTTP-based
+   fallback would need actual network reachability this sandbox doesn't have (Section 7.3: "CI
+   never calls Smile ID or Prembly"). The retry→fallback *mechanism* itself is fully unit-tested
+   with fully-controllable fake providers in `screening-engine/src/fallback.spec.ts`; only the
+   "fallback provider genuinely succeeds where primary failed, for the same real input" scenario is
+   the untested (undecidable without a MockProvider redesign) half.
+5. **`dto/screen-customer.dto.ts` from Section 4.1's literal file tree doesn't exist** — its purpose
+   was never spelled out (a request body for `/sanctions` doesn't need one; it re-screens the
+   customer's own already-stored fields). `dto/configure-providers.dto.ts` exists instead, since
+   `PUT /screening/providers` genuinely needs a request DTO and nothing else in the tree names it.
+6. **`screening.check.completed`/`customer.pep_flagged`/`customer.sanctions_flagged` are both
+   `EventEmitter2` events (Section 8) *and* `audit_log` rows (Section 12's Definition of Done lists
+   them as audit actions).** Initially built as events only; caught before considering this prompt
+   done by re-reading Section 12 literally against what was actually persisted, and fixed by adding
+   the corresponding `AuditService.record`/direct-repo-write calls at every emission site, both
+   `apps/api`- and `apps/worker`-side.
+7. **Section 9's async-enqueue choice**: inline for the synchronous sanctions pre-screen at
+   onboarding (unavoidable — it's the return value the caller blocks on) and for the async
+   PEP/adverse-media enqueue at onboarding (called directly from `CustomersService.create()`,
+   after commit); event-driven (`@OnEvent("customer.updated")`, `CustomerListener`) for the
+   post-onboarding `UPDATE` trigger, since `customer.updated` already exists as a stable public
+   event and subscribing to it keeps `CustomersService` itself unaware that screening cares about
+   its updates.
+8. **Auto-opening a Case when `match.score >= 80` is not implemented in any form — no stub, no
+   TODO, no log-only no-op.** Case Management doesn't exist as a backend module: `apps/api/src` has
+   no `Case` entity, module, or service, and `packages/db` has no `case`/`cases` table in any
+   migration. (The only "Case" code anywhere in the repo is unrelated frontend mock data — random
+   `matchScore` values for UI display only — on a separate, disconnected `feature/frontend-mock-data-demo`
+   branch, not this branch or `master`.) Unlike `TRANSACTION_VELOCITY` (deviation #4 above), which is
+   a genuine scaffold with an injectable no-op adapter standing in for its missing dependency,
+   screening's score path has no equivalent hook at all: `bandScore()`
+   (`packages/screening-engine/src/thresholds.ts`) bands a match against the real configured
+   thresholds (`potentialMatchMin: 60`, `confirmedMatchMin: 85` — there is no `80` threshold
+   anywhere in the codebase), and both `MatchReviewService.applyTruePositive` (`apps/api`, fired on
+   a human `TRUE_POSITIVE` review decision) and its automated-`CONFIRMED_MATCH` counterpart
+   (`apps/worker/src/screening/apply-confirmed-match.ts`) dead-end at flagging
+   `isSanctioned`/`isPep`, re-scoring the customer, and writing the audit/event pair — neither
+   references a score threshold, a Case, or an escalation queue anywhere past that point. When Case
+   Management ships, this needs a genuinely new branch added at both of those call sites (checking
+   `match.matchScore >= 80` and opening a Case), not a wire-up of an existing scaffold.
+
+### Known issues / incomplete items (Backend Prompt 3)
+
+- **A `pnpm build` (root, via turbo) hang was observed once this session and initially misdiagnosed
+  as a `turbo.json` `outputs`-glob caching config mismatch** (a warning — `no output files found for
+  task @regops/api#build` — seen alongside it). Retried later and completed cleanly in 49s, so the
+  hang itself didn't reproduce and was never root-caused with certainty. The warning *was* run to
+  ground, though, and it's a different, real, pre-existing bug: **a recurrence of Backend Prompt
+  1's already-documented bug #2** (stale `apps/api/tsconfig.tsbuildinfo` convinces `tsc`
+  `dist/` is already up to date when it isn't, so it exits 0 having silently written nothing).
+  Confirmed directly — `rm -rf dist tsconfig.tsbuildinfo && npx nest build` produced a full `dist/`
+  where `pnpm build`'s turbo-orchestrated run had produced none. Not a `turbo.json` `outputs` key
+  problem at all; that was an incorrect first guess, corrected here rather than left standing. If a
+  future `dist/` ever comes up empty after a "successful" build, this is the fix (see bug #2's own
+  entry above for the full explanation) — turbo's caching just makes the missing-output symptom
+  show up one layer further away from the actual `tsc` invocation.
+- **`ManualScreenDto`, `ReviewMatchDto`, and `ConfigureProvidersDto` render as an empty `{"type":
+  "object", "properties": {}}` schema in Swagger** — confirmed by curling the live `/docs-json` and
+  inspecting each endpoint's `requestBody` schema directly. None of the three has explicit
+  `@ApiProperty()` decorators, and the `@nestjs/swagger` CLI plugin that would otherwise infer them
+  automatically isn't enabled in `apps/api/nest-cli.json` (same reason `ListCustomersDto`'s query
+  params don't render for `GET /customers` — Prompt 2's handoff already documented that half of the
+  same gap). Concretely: `POST /screening/customers/:id/screen`, `POST /screening/matches/:id/review`,
+  and `PUT /screening/providers` all show a blank `{}` JSON box in Swagger's UI, not typed fields —
+  the correct body has to be typed in by hand from the DTO source, same as Prompt 2's
+  `POST /customers/batch` gap. The endpoints themselves validate and behave correctly regardless
+  (confirmed live and by e2e tests) — this is purely a Swagger discoverability gap.
+- **`GET /screening/checks` and `GET /screening/matches` have no query parameters declared in
+  Swagger either** (`customer_id`/`check_type`/`status`/`result`/`review_status`/`page`/`limit` —
+  confirmed absent via the same `/docs-json` inspection) — the exact same class of gap Prompt 2's
+  handoff already documented for `GET /customers`' fuzzy-search params. Clicking "Try it out" shows
+  only an Execute button; the endpoints' filtering logic itself works (verified by e2e tests and
+  live `curl` with query strings), it just can't be driven from typed Swagger fields.
+- **No unit tests for `apps/api/src/screening/*.ts` services themselves** (`ScreeningService`,
+  `MatchReviewService`, `ProviderRegistry`, `ScreeningProviderConfigService`) — coverage is e2e-only
+  for this module's NestJS layer, same pre-existing gap `AuthService`/`UsersService`/etc. already
+  have (see "Known issues" above, Backend Prompt 1).
+- **The 3 scheduled cron jobs' actual `@Cron(...)` schedules have not been observed firing in real
+  time** — more precisely than this entry previously stated, only the *downstream* work a dequeued
+  job does (`processRescreenJob` in `apps/worker`, 5 tests in
+  `apps/worker/test/screening.e2e-spec.ts`, using hand-built job payloads that bypass the real
+  producer entirely) is actually exercised. That is a narrower guarantee than it sounds like next to
+  `RescoreSchedulerService`'s identically-worded Prompt 2 caveat — see the entry directly below for
+  what it leaves uncovered on the producer side.
+- **`RescreenSchedulerService` and `RescreenQueueService` (the producer side of scheduled per-tier
+  re-screening — the `@Cron` triggers themselves and the `enqueueForAllTenants` fan-out/`enqueue`
+  call) have zero test coverage: no unit test, no e2e test, referenced in no test file in the repo
+  at all** (confirmed by grepping `apps/api/test`, `apps/worker/test`, and for any `.spec.ts` near
+  the scheduler/queue source). This is a materially different, more serious situation than Prompt
+  2's analogous `RescoreSchedulerService` cron jobs, whose own Definition-of-Done caveat carries the
+  same "timing not observed firing live" wording but *is* backed by a real e2e test
+  (`risk-rescoring.e2e-spec.ts`) exercising the actual scheduled logic end-to-end, just not on the
+  real clock. Here there is no equivalent test at any level for the scheduler/producer side — only
+  the unrelated dequeue-side `processRescreenJob` work above is tested, using payloads constructed
+  by hand rather than ones that actually came from `RescreenQueueService.enqueue`. This should be
+  closed out with a real test (e.g., instantiate `RescreenSchedulerService` directly and call
+  `dailyRescreenHighRisk()`/`weeklyRescreenMediumRisk()`/`monthlyRescreenLowRisk()`, or seed
+  multiple tenants and assert `RescreenQueueService.enqueue` fires once per active tenant with the
+  right `riskLevels`/`checkTypes`) before this module is considered fully production-ready — this is
+  a real correctness/coverage gap, distinct from the Swagger-documentation-only gaps listed
+  elsewhere in this section, which don't affect whether the underlying logic actually works.
+- **Real Smile ID / Prembly response-shape mapping is unverified against the real sandboxes** —
+  this environment has no network access to either. Field names (`match_categories`,
+  `confidence_value`, `watchlist_hits`, etc.) follow the spec's own wording as closely as possible;
+  revisit before ever pointing a `ScreeningProviderConfig` row at a real (non-`MOCK`) provider.
+- **`GET /screening/providers`/`PUT /screening/providers` have only one direct e2e test each**
+  (list via the config-isolation test; configure via the same) — no dedicated test for
+  `PUT`'s validation edges (e.g. two `is_primary: true` rows for the same check_type in one
+  request, which the partial unique index would reject at the DB layer with an unhandled
+  constraint-violation error rather than a clean 4xx).
+
+### Definition of Done — Backend Prompt 3 — verified vs. not verified
+
+| # | Item | Status |
+|---|---|---|
+| 1 | Migration applies cleanly and rolls back cleanly | ✅ Verified — applied/reverted/re-applied against the live Postgres multiple times, including a from-empty-schema run alongside all four earlier migrations |
+| 2 | All four entities created, RLS policies applied | ✅ Verified — migration includes `ENABLE`/`FORCE ROW LEVEL SECURITY` + `tenant_isolation`/`super_admin_bypass` policies for all four tables |
+| 3 | All endpoints in Section 6 functional and role-gated | ✅ Verified — all 9 endpoints e2e-tested (list/detail/review/providers/sanctions/screen), each behind `@Roles(...)` matching the spec's table; also independently re-confirmed by hand against a live server via `curl` (role check on `PUT /screening/providers` as COMPLIANCE_OFFICER → real `403 FORBIDDEN_ROLE`, `GET /screening/checks/{bad-id}` → real `404`) |
+| 4 | Default ScreeningProviderConfig seeded for every new tenant (MockProvider non-prod; SmileId+Prembly fallback prod) | ✅ Verified for non-prod (seed script + `TenantsService.create()`, confirmed via direct DB query and live `GET /screening/providers` against the seeded demo tenant) — the prod branch is written but not exercised by any test (this sandbox has no production env to seed against) |
+| 5 | Synchronous sanctions block at customer creation working end-to-end | ✅ Verified — `screening.e2e-spec.ts`'s sync-block tests, plus a live `curl` walk (see the design-decision writeup above) confirming the exact `422` body |
+| 6 | Fail-closed behavior on provider outage verified by test | ⚠️ Partial — the no-fallback → 503 path is fully verified (by test *and* live against the demo tenant's actual seeded config, no special setup needed); the with-fallback → recovery path is not (see deviation #4) |
+| 7 | Async PEP/adverse-media flow working end-to-end | ✅ Verified — `apps/worker`'s `processAsyncScreeningJob` tests, including the ADVERSE_MEDIA-never-auto-flags case |
+| 8 | Match review workflow (TRUE_POSITIVE/FALSE_POSITIVE, downstream flags) | ✅ Verified — both decisions tested, plus the 409-on-second-review and 403-as-VIEWER edges |
+| 9 | Scheduled re-screening jobs registered and tested via manual trigger | ⚠️ Partial — same caveat as Prompt 2's `RescoreSchedulerService`: the underlying job logic is directly tested, the `@Cron` schedules themselves have not been observed firing |
+| 10 | Internal blacklist hard-wired to run first; verified by test | ✅ Verified — a name that would score CLEAN under `MockProvider` alone returns CONFIRMED_MATCH once blacklisted, plus an expiry-respecting negative case |
+| 11 | Dedup of repeated screening calls within 1 hour | ✅ Verified — a second identical check returns the same cached `ScreeningCheck` id, not a new one |
+| 12 | All audit log actions present (`screening.check.completed`, `screening.match.reviewed`, `customer.create.blocked`, `customer.pep_flagged`, `customer.sanctions_flagged`) | ✅ Verified — all five confirmed as real `audit_log` rows via direct SQL query in e2e tests (not just emitted events) |
+| 13 | Swagger `/docs` covers all new endpoints | ⚠️ Partial — all 9 endpoints confirmed present in `/docs-json` (curled and inspected directly), all carry `@ApiTags`/`@ApiBearerAuth`. But 3 request-body DTOs (`ManualScreenDto`, `ReviewMatchDto`, `ConfigureProvidersDto`) render as an empty `{}` schema and 2 list endpoints have no query parameters declared — real, now-documented gaps (see Known Issues), same class as Prompt 2's `GET /customers` gap, not a regression introduced by not checking |
+| 14 | All tests in Section 10 pass; Prompt 1/2 tests still pass | ✅ Verified — `apps/api` e2e: 56/56 (up from 46, all pre-existing suites still green); `apps/worker` e2e: 14/14 non-benchmark tests; `packages/screening-engine`: 40/40 unit tests; `packages/risk-engine`: still 64/64 (untouched) |
+| 15 | CI is green | ❌ Not verified — same as every earlier prompt: no remote configured, nothing pushed, GitHub Actions has never actually run |
+
+**Bottom line**: the module's CBN-critical guarantee — a confirmed sanctions match blocks
+onboarding with no Customer row ever written, fails closed (never open) on a provider outage, and
+leaves a complete audit trail even though the request itself errors — is verified end-to-end
+against a real Postgres, not just written, and confirmed a second, independent way: by hand,
+through a live server, via `docs/testing/prompt-3-swagger-test-guide.md`'s click-by-click walk. The
+async PEP/adverse-media flow, the match-review workflow's flag-setting, the internal-blacklist
+short-circuit, and dedup are all verified the same way. What's left is genuinely: real-time cron
+observation (same caveat Prompt 2 already carries), real-provider response-shape verification
+against actual Smile ID/Prembly sandboxes (no network access here), and the one
+intentionally-undecidable test case (fallback recovering where `MockProvider`-as-primary failed,
+for identical input).

@@ -7,6 +7,7 @@ import {
   createUserFixture,
   createTestContext,
   seedRiskFactorConfigsFixture,
+  seedScreeningProviderConfigsFixture,
   TestContext,
 } from "./utils/test-app";
 
@@ -21,6 +22,11 @@ describe("Customers (e2e)", () => {
     tenantBId = (await createTenantFixture(ctx.adminDataSource)).id;
     await seedRiskFactorConfigsFixture(ctx.adminDataSource, tenantAId);
     await seedRiskFactorConfigsFixture(ctx.adminDataSource, tenantBId);
+    // Section 5.1 (Backend Prompt 3): customer creation now runs a
+    // synchronous sanctions pre-screen, which requires a configured
+    // provider for the tenant, same reasoning as risk-rescoring.e2e-spec.ts.
+    await seedScreeningProviderConfigsFixture(ctx.adminDataSource, tenantAId);
+    await seedScreeningProviderConfigsFixture(ctx.adminDataSource, tenantBId);
   });
 
   afterAll(async () => {

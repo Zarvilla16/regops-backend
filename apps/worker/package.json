@@ -15,6 +15,7 @@
     "@regops/db": "workspace:*",
     "@regops/file-storage": "workspace:*",
     "@regops/risk-engine": "workspace:*",
+    "@regops/screening-engine": "workspace:*",
     "@regops/shared": "workspace:*",
     "bullmq": "^5.34.5",
     "csv-parse": "^7.0.1",

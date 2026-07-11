@@ -5,9 +5,22 @@ import * as path from "path";
 import { Queue, Worker } from "bullmq";
 import { DataSource } from "typeorm";
 import { entities } from "@regops/db";
-import { CUSTOMER_INGESTION_QUEUE, IngestionJobData, IngestionJobResult, MAINTENANCE_QUEUE } from "@regops/shared";
+import {
+  ASYNC_SCREENING_QUEUE,
+  AsyncScreeningJobData,
+  AsyncScreeningJobResult,
+  CUSTOMER_INGESTION_QUEUE,
+  IngestionJobData,
+  IngestionJobResult,
+  MAINTENANCE_QUEUE,
+  RESCREEN_QUEUE,
+  RescreenJobData,
+  RescreenJobResult,
+} from "@regops/shared";
 import { LocalFileStorage } from "@regops/file-storage";
 import { processIngestionJob } from "./customer-ingestion/ingestion-job.processor";
+import { processAsyncScreeningJob } from "./screening/async-screening.processor";
+import { processRescreenJob } from "./screening/rescreen-job.processor";
 
 dotenv.config();
 
@@ -92,7 +105,19 @@ async function bootstrap(): Promise<void> {
     { connection },
   );
 
-  for (const worker of [maintenanceWorker, ingestionWorker]) {
+  const asyncScreeningWorker = new Worker<AsyncScreeningJobData, AsyncScreeningJobResult>(
+    ASYNC_SCREENING_QUEUE,
+    async (job) => processAsyncScreeningJob(adminDataSource, job.data),
+    { connection },
+  );
+
+  const rescreenWorker = new Worker<RescreenJobData, RescreenJobResult>(
+    RESCREEN_QUEUE,
+    async (job) => processRescreenJob(adminDataSource, job.data),
+    { connection },
+  );
+
+  for (const worker of [maintenanceWorker, ingestionWorker, asyncScreeningWorker, rescreenWorker]) {
     worker.on("completed", (job) => {
       console.log(`[worker] job ${job.name} completed`);
     });
@@ -106,15 +131,22 @@ async function bootstrap(): Promise<void> {
   // other apps (`pnpm dev` runs api:4000, web:3000, worker:4001).
   const healthServer = http.createServer((_req, res) => {
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", queues: [MAINTENANCE_QUEUE, CUSTOMER_INGESTION_QUEUE] }));
+    res.end(
+      JSON.stringify({
+        status: "ok",
+        queues: [MAINTENANCE_QUEUE, CUSTOMER_INGESTION_QUEUE, ASYNC_SCREENING_QUEUE, RESCREEN_QUEUE],
+      }),
+    );
   });
   healthServer.listen(PORT);
 
   console.log(
-    `RegOps worker listening on queues "${MAINTENANCE_QUEUE}", "${CUSTOMER_INGESTION_QUEUE}", health check on :${PORT}`,
+    `RegOps worker listening on queues "${MAINTENANCE_QUEUE}", "${CUSTOMER_INGESTION_QUEUE}", "${ASYNC_SCREENING_QUEUE}", "${RESCREEN_QUEUE}", health check on :${PORT}`,
   );
 
   const shutdown = async () => {
+    await rescreenWorker.close();
+    await asyncScreeningWorker.close();
     await ingestionWorker.close();
     await maintenanceWorker.close();
     await maintenanceQueue.close();

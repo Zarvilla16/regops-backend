@@ -4,7 +4,17 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "baseUrl": "./",
-    "incremental": true,
+    // Deliberately false, unlike most tsconfigs in this monorepo: nest-cli.json
+    // sets deleteOutDir:true, which wipes dist/ unconditionally at the start of
+    // every `nest build`. Combined with incremental:true, tsc's tsconfig.tsbuildinfo
+    // cache can conclude "source unchanged since last build, nothing to re-emit"
+    // for a dist/ that deleteOutDir just deleted moments earlier in the SAME
+    // invocation — silently exiting 0 with an empty/missing dist/ (bug #2 in
+    // HANDOFF.md, which recurred because deleting tsconfig.tsbuildinfo by hand
+    // only fixed the next build, not the one after that). incremental:false
+    // makes every build fully self-consistent with deleteOutDir: a full
+    // recompile every time, slower but structurally unable to skip emitting.
+    "incremental": false,
     "module": "commonjs",
     "target": "ES2022",
     "allowJs": false

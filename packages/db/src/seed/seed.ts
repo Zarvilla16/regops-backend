@@ -5,7 +5,8 @@ import { AppDataSource } from "../data-source";
 import { TenantEntity } from "../entities/tenant.entity";
 import { UserEntity } from "../entities/user.entity";
 import { RiskFactorConfigEntity } from "../entities/risk-factor-config.entity";
-import { TenantStatus, TenantType, UserRole, UserStatus } from "@regops/shared";
+import { ScreeningProviderConfigEntity } from "../entities/screening-provider-config.entity";
+import { ScreeningCheckType, ScreeningProviderName, TenantStatus, TenantType, UserRole, UserStatus } from "@regops/shared";
 import { DEFAULT_RISK_FACTOR_CONFIGS } from "@regops/risk-engine";
 
 dotenv.config();
@@ -24,6 +25,38 @@ const ARGON2_OPTIONS: argon2.Options = {
 
 async function hash(password: string): Promise<string> {
   return argon2.hash(password, ARGON2_OPTIONS);
+}
+
+/**
+ * Idempotent — safe to re-run against a tenant that's already been seeded.
+ * Section 11's Definition of Done: "MockProvider as primary in non-prod
+ * env; SmileId primary + Prembly fallback in prod env." Seeding always runs
+ * with regops_admin (BYPASSRLS) via docker-compose/local dev, which is
+ * never a production environment, so this seeds the non-prod (MockProvider)
+ * defaults unconditionally — a real prod deployment provisions tenants
+ * through the API (ScreeningProviderConfigService.seedDefaultsForTenant),
+ * not this CLI script.
+ */
+async function seedScreeningProviderConfigs(tenantId: string): Promise<void> {
+  const repo = AppDataSource.getRepository(ScreeningProviderConfigEntity);
+  const checkTypes = [ScreeningCheckType.SANCTIONS, ScreeningCheckType.PEP, ScreeningCheckType.ADVERSE_MEDIA];
+
+  for (const checkType of checkTypes) {
+    const existing = await repo.findOne({ where: { tenantId, checkType, isPrimary: true } });
+    if (existing) continue;
+    await repo.save(
+      repo.create({
+        tenantId,
+        checkType,
+        provider: ScreeningProviderName.MOCK,
+        isPrimary: true,
+        isFallback: false,
+        credentialsRef: "env://MOCK_PROVIDER_UNUSED",
+        config: {},
+        isActive: true,
+      }),
+    );
+  }
 }
 
 /** Idempotent — safe to re-run against a tenant that's already been seeded. */
@@ -69,6 +102,7 @@ async function seed(): Promise<void> {
     console.log(`Created platform tenant: ${platformTenant.id}`);
   }
   await seedRiskFactorConfigs(platformTenant.id);
+  await seedScreeningProviderConfigs(platformTenant.id);
 
   let superAdmin = await userRepo.findOne({
     where: { tenantId: platformTenant.id, email: SUPER_ADMIN_EMAIL },
@@ -101,6 +135,7 @@ async function seed(): Promise<void> {
     console.log(`Created demo tenant: ${demoTenant.id}`);
   }
   await seedRiskFactorConfigs(demoTenant.id);
+  await seedScreeningProviderConfigs(demoTenant.id);
 
   const demoTenantAdminEmail = "admin@demomfb.dev";
   let tenantAdmin = await userRepo.findOne({

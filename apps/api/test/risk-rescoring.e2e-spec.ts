@@ -9,6 +9,7 @@ import {
   createUserFixture,
   createTestContext,
   seedRiskFactorConfigsFixture,
+  seedScreeningProviderConfigsFixture,
   TestContext,
 } from "./utils/test-app";
 
@@ -20,6 +21,11 @@ describe("Risk re-scoring (e2e)", () => {
     ctx = await createTestContext();
     tenantId = (await createTenantFixture(ctx.adminDataSource)).id;
     await seedRiskFactorConfigsFixture(ctx.adminDataSource, tenantId);
+    // Section 5.1 (Backend Prompt 3): customer creation now runs a
+    // synchronous sanctions pre-screen, which requires a configured
+    // provider — without this, every createCustomer() call below would
+    // 500 (ProviderRegistry: "no primary provider configured").
+    await seedScreeningProviderConfigsFixture(ctx.adminDataSource, tenantId);
   });
 
   afterAll(async () => {

@@ -1,9 +1,11 @@
 import { Injectable } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { DataSource } from "typeorm";
 import { TenantEntity } from "@regops/db";
 import { AuthUserContext, TenantStatus } from "@regops/shared";
 import { AuditService } from "../audit/audit.service";
 import { RiskFactorConfigService } from "../risk/config/risk-factor-config.service";
+import { ScreeningProviderConfigService } from "../screening/providers/screening-provider-config.service";
 import { CreateTenantDto } from "./dto/create-tenant.dto";
 import { RequestMeta } from "../users/users.service";
 
@@ -13,6 +15,8 @@ export class TenantsService {
     private readonly dataSource: DataSource,
     private readonly auditService: AuditService,
     private readonly riskFactorConfigService: RiskFactorConfigService,
+    private readonly screeningProviderConfigService: ScreeningProviderConfigService,
+    private readonly configService: ConfigService,
   ) {}
 
   toDto(tenant: TenantEntity) {
@@ -67,6 +71,12 @@ export class TenantsService {
       // 5.5) — a tenant admin can tune weight/config afterward without any
       // code change.
       await this.riskFactorConfigService.seedDefaultsForTenant(queryRunner, tenant.id);
+
+      // Section 11's Definition of Done: "Default ScreeningProviderConfig
+      // seeded for every new tenant — MockProvider as primary in non-prod
+      // env; SmileId primary + Prembly fallback in prod env."
+      const isProd = this.configService.get<string>("nodeEnv") === "production";
+      await this.screeningProviderConfigService.seedDefaultsForTenant(queryRunner, tenant.id, isProd);
 
       await this.auditService.record(queryRunner, {
         tenantId: tenant.id,

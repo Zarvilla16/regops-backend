@@ -7,3 +7,7 @@ export * from "./entities/idempotency-key.entity";
 export * from "./entities/customer.entity";
 export * from "./entities/risk-score-history.entity";
 export * from "./entities/risk-factor-config.entity";
+export * from "./entities/screening-provider-config.entity";
+export * from "./entities/screening-check.entity";
+export * from "./entities/screening-match.entity";
+export * from "./entities/internal-blacklist.entity";

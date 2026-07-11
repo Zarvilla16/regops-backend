@@ -12,3 +12,4 @@ coverage/
 pnpm-debug.log*
 .pnpm-store/
 .local-storage/
+.vercel

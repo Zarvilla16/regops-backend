@@ -2,9 +2,10 @@ import { ConflictException, Injectable, NotFoundException } from "@nestjs/common
 import { EventEmitter2 } from "@nestjs/event-emitter";
 import { QueryRunner } from "typeorm";
 import { CustomerEntity } from "@regops/db";
-import { AuthUserContext, CustomerDto, ScoreTrigger } from "@regops/shared";
+import { AuthUserContext, CustomerDto, ScoreTrigger, ScreeningCheckType, ScreeningTrigger } from "@regops/shared";
 import { AuditService } from "../audit/audit.service";
 import { RiskService } from "../risk/risk.service";
+import { ScreeningService } from "../screening/screening.service";
 import { CreateCustomerDto } from "./dto/create-customer.dto";
 import { UpdateCustomerDto } from "./dto/update-customer.dto";
 import { ListCustomersDto } from "./dto/list-customers.dto";
@@ -32,6 +33,7 @@ export class CustomersService {
     private readonly riskService: RiskService,
     private readonly auditService: AuditService,
     private readonly eventEmitter: EventEmitter2,
+    private readonly screeningService: ScreeningService,
   ) {}
 
   private maskId(value: string | null): string | null {
@@ -195,6 +197,24 @@ export class CustomersService {
       }
     }
 
+    // Section 5.1 (Backend Prompt 3): synchronous, blocking sanctions
+    // pre-screen — BEFORE the Customer row is inserted, and before this
+    // method's own transaction even opens. screenSync throws 422
+    // (SANCTIONS_MATCH_BLOCK) on a confirmed match or 503 (fail-closed) on a
+    // provider outage; either way, no Customer row is ever written. It runs
+    // on its own dedicated connection (see ScreeningService.
+    // withDedicatedTenantContext) specifically so the resulting
+    // screening_check audit row survives even though this whole request's
+    // ambient transaction is about to be rolled back by TransactionInterceptor
+    // when that exception propagates.
+    const sanctionsResult = await this.screeningService.screenSync(
+      tenantId,
+      ScreeningCheckType.SANCTIONS,
+      { fullName: dto.fullName, dateOfBirth: dto.dateOfBirth ? new Date(dto.dateOfBirth) : null, bvn: dto.bvn ?? null, nin: dto.nin ?? null, country: dto.country ?? "NG", nationality: dto.nationality ?? null },
+      ScreeningTrigger.ONBOARDING,
+      currentUser.sub,
+    );
+
     await queryRunner.startTransaction();
     try {
       const customer = await repo.save(
@@ -215,6 +235,10 @@ export class CustomersService {
           onboardedAt: new Date(dto.onboardedAt),
         }),
       );
+
+      // Attaches this customer's id to the (already-committed, elsewhere)
+      // screening_check row the pre-screen above left with customer_id NULL.
+      await this.screeningService.attachCustomer(queryRunner, sanctionsResult.check.id, customer.id);
 
       await this.riskService.calculateAndPersist(queryRunner, customer, ScoreTrigger.INITIAL, null);
       // Re-read: calculateAndPersist updated risk_score/risk_level via a raw UPDATE, which doesn't
@@ -239,6 +263,13 @@ export class CustomersService {
         customerId: customer.id,
         cbsCustomerId: customer.cbsCustomerId,
       });
+
+      // Section 5.2: async, non-blocking PEP + adverse-media screening — only
+      // enqueued after the customer row has durably committed, so the
+      // worker can never race ahead of a row that doesn't exist yet (same
+      // reasoning as emitting customer.created only after commit, just
+      // above).
+      await this.screeningService.enqueueAsync(tenantId, customer.id, [ScreeningCheckType.PEP, ScreeningCheckType.ADVERSE_MEDIA], ScreeningTrigger.ONBOARDING);
 
       return this.toDto(scored);
     } catch (err) {

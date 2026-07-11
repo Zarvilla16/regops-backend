@@ -6,3 +6,5 @@
  */
 export const MAINTENANCE_QUEUE = "maintenance";
 export const CUSTOMER_INGESTION_QUEUE = "customer-ingestion";
+export const ASYNC_SCREENING_QUEUE = "async-screening";
+export const RESCREEN_QUEUE = "rescreen";
