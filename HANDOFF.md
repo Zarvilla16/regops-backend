@@ -1389,9 +1389,11 @@ guarantees.
    dry-run, alert assign/close, replay) are untouched, and the two tests that only needed *a* seeded
    `Alert` row to exercise the alerts HTTP surface now call `AlertsService.createOrIncrement` directly
    instead of a full evaluation. **The multi-instance duplicate-enqueue characteristic described
-   below is unaffected by this fix and still applies** — it's caused by `TransactionIngestionQueueService`'s
+   below was unaffected by this particular fix** — it's caused by `TransactionIngestionQueueService`'s
    own `QueueEvents` bridge fanning out `transaction.ingested` per `apps/api` replica (upstream of
-   `RuleEvaluationQueueService.enqueue`), not by where the rule-evaluation consumer itself runs.
+   `RuleEvaluationQueueService.enqueue`), not by where the rule-evaluation consumer itself runs — and
+   was left as a disclosed Known Issue at the time. It has since been resolved by an independent
+   follow-up session; see the Known Issues entry below for that fix.
    Verified: `pnpm build`/`pnpm test`/`pnpm test:e2e` all green at the repo root, plus a live
    `pnpm dev` walkthrough (not just the automated suite) re-running two of
    `docs/testing/prompt-5-swagger-test-guide.md`'s scenarios — `LARGE_CASH` and
@@ -1445,13 +1447,49 @@ guarantees.
 
 ### Known issues / incomplete items (Backend Prompt 5)
 
-- **Multi-instance `apps/api` duplicate rule evaluation** (Deviations #1) — each live `apps/api`
-  process independently enqueues a `rule-evaluation` job per `transaction.ingested` completion it
-  observes via its own `QueueEvents` bridge. Alert-level correctness is unaffected (UPSERT dedup
-  collapses it), but `RuleEvaluation` audit-row volume and rule-evaluation queue load both scale
-  with instance count, not transaction count. Fixing this properly (e.g. one instance elected/locked
-  as the sole `QueueEvents` listener, or moving the bridge itself into a single-instance component)
-  is a real v2 item, not something papered over here.
+- ~~Multi-instance `apps/api` duplicate rule evaluation~~ — **resolved in a follow-up session**
+  (`integration/v1`, independent of the `evaluate-rules`-relocation fix above). **Root cause,
+  confirmed by reading the code, not assumed**: every live `apps/api` process still independently
+  observes the same `transaction.ingested` completion — that part is unchanged and, on its own, is
+  not the bug. `transaction.ingested` is raised by `TransactionIngestionQueueService`'s own
+  `QueueEvents` bridge, and Redis pub/sub genuinely fans a queue's "completed" notification out to
+  *every* subscriber, so N running `apps/api` replicas each get their own copy of the event and each
+  independently call their own `TransactionListener.onTransactionIngested`. Two listeners subscribe
+  to `transaction.ingested` in this codebase: `RiskModule`'s (Section 9.4's 60s re-score debounce)
+  and `RulesModule`'s (this one). `RiskModule`'s was never actually affected by the fan-out — its
+  debounce already goes through a Redis `SET NX` lock (`TransactionIngestionQueueService.acquireLock`),
+  which happens to make it naturally idempotent across replicas too (only one instance's lock
+  acquisition succeeds; the rest short-circuit on `return`). `RulesModule`'s
+  `TransactionListener` had no equivalent guard — it called `RuleEvaluationQueueService.enqueue()`
+  unconditionally, and that method's own `Queue.add()` call passed no explicit `jobId`, so BullMQ
+  auto-generated a fresh, distinct id on every call — N independent jobs, one genuine job's worth of
+  work each, for one transaction. No other `@OnEvent` listener in `apps/api` was affected: the only
+  other one (`customer.updated`, in `ScreeningModule`) is emitted directly, in-process, from
+  `CustomersService` as part of handling a single HTTP request — never bridged through `QueueEvents`
+  — so only the one replica that actually received that request ever emits it; there is no fan-out to
+  be idempotent against in the first place. **Fix**: `RuleEvaluationQueueService.enqueue()` now
+  passes `jobId: data.transactionId` to `Queue.add()` (see that method's own docblock) — the same
+  "deterministic jobId collapses multiple producers into one job" idiom
+  `TransactionIngestionQueueService.enqueue`'s `jobId: data.batchId` already established in this
+  codebase, applied here for the reason it actually matters this time (there, a single HTTP request
+  triggers exactly one enqueue call regardless; here, up to N replicas each independently attempt
+  one). `transactionId` is a UUID, globally unique with no per-tenant collision risk, and
+  `RuleEvaluationQueueService.enqueue` has exactly one call site with no legitimate case for two
+  concurrent jobs over the same transaction — so BullMQ silently returning the already-enqueued job's
+  reference on the 2nd..Nth call is exactly the desired outcome. This changes nothing about
+  retry/failure handling — job creation (client-side, `Queue.add`) and job execution resilience
+  (`apps/worker`'s stalled-job detection, any configured `attempts`) are orthogonal BullMQ concerns;
+  a worker crash mid-processing is still recovered exactly as before. **Verified**: a new
+  `apps/api/test/rules.e2e-spec.ts` describe block (`RuleEvaluationQueueService: idempotent enqueue
+  across apps/api replicas`) proves two `enqueue()` calls with the same `transactionId` produce
+  exactly one job in the queue (enumerated across every BullMQ job state, not just an id-equality
+  check) and that different transaction ids still get independent jobs. Beyond the automated suite,
+  also verified live with two genuinely separate `apps/api` OS processes (`:4000` and a second
+  `node dist/main.js` on `:4002`, both pointed at the same Postgres/Redis) — ingesting one
+  transaction through `:4000` produced exactly 5 `rule_evaluation` rows (one per active rule, not
+  10), one `Alert` with `fire_count = 1` (not 2), and exactly one `bull:rule-evaluation:<transactionId>`
+  key in Redis — the same live 2-instance setup that originally demonstrated this bug (see the
+  `evaluate-rules` relocation entry above) now produces exactly one evaluation, not two.
 - **No literal fault-injection test for "one rule throwing an error does not prevent other rules
   from firing" (Section 11.2)** — the per-rule try/catch in `evaluateTransaction`
   (`apps/worker/src/rules/evaluate-rules.processor.ts`, formerly `apps/api`'s

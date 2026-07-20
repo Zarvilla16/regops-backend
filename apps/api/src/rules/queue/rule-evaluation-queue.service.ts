@@ -95,8 +95,38 @@ export class RuleEvaluationQueueService implements OnModuleDestroy {
     }
   }
 
+  /**
+   * `jobId: data.transactionId` makes this call idempotent across
+   * `apps/api` replicas — deliberately, not incidentally. `transaction.
+   * ingested` is itself raised by `TransactionIngestionQueueService`'s own
+   * `QueueEvents` bridge, which every live `apps/api` instance runs a copy
+   * of; Redis pub/sub fans that bridge's "completed" notification out to
+   * every subscriber, so N running instances each independently observe the
+   * same completion and each call `TransactionListener.onTransactionIngested`
+   * → this method, once per instance, for the same transaction. Without a
+   * deterministic jobId, BullMQ's `Queue.add` treats each of those N calls
+   * as a distinct job (auto-generated id), so the transaction gets evaluated
+   * N times — wasted evaluation work, not a correctness bug (the alert-layer
+   * dedup-key UPSERT already collapses any resulting duplicate fires into
+   * one `Alert` row), but real, growing CPU/DB cost as replica count grows.
+   * `transactionId` is a UUID, globally unique on its own (no tenantId
+   * prefix needed), and this is the method's only call site with no
+   * legitimate case for two independent concurrent jobs over the same
+   * transaction — so `Queue.add` silently returning the already-enqueued
+   * job's reference on the 2nd..Nth call (BullMQ's documented behavior for
+   * a jobId still present in the queue) is exactly the desired outcome:
+   * exactly one job actually runs, whichever instance's `.add()` call
+   * reaches Redis first. This does not change retry/failure handling at
+   * all — that's entirely a Worker-side concern (`apps/worker`'s stalled-job
+   * detection and any configured `attempts`), orthogonal to how the job was
+   * created. Same "deterministic jobId so multiple producers collapse to one
+   * job" idiom `TransactionIngestionQueueService.enqueue` already uses
+   * (`jobId: data.batchId`), applied here for the same reason it matters —
+   * multiple things able to independently produce the same logical unit of
+   * work.
+   */
   async enqueue(data: RuleEvaluationJobData): Promise<string> {
-    const job = await this.queue.add("evaluate-rules", data);
+    const job = await this.queue.add("evaluate-rules", data, { jobId: data.transactionId });
     return job.id as string;
   }
 

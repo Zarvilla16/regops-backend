@@ -1,6 +1,7 @@
 import request from "supertest";
 import * as crypto from "crypto";
 import { DataSource, QueryRunner } from "typeorm";
+import { Queue } from "bullmq";
 import {
   AlertEntity,
   AuditLogEntity,
@@ -15,6 +16,7 @@ import {
   AlertSeverity,
   AlertStatus,
   CustomerType,
+  RULE_EVALUATION_QUEUE,
   RuleReplayStatus,
   RuleScenarioType,
   TransactionChannel,
@@ -24,6 +26,7 @@ import {
 } from "@regops/shared";
 import { RuleReplayService } from "../src/rules/replay/rule-replay.service";
 import { AlertsService } from "../src/rules/alerts/alerts.service";
+import { RuleEvaluationQueueService } from "../src/rules/queue/rule-evaluation-queue.service";
 import {
   closeTestContext,
   createTenantFixture,
@@ -35,13 +38,24 @@ import {
   TestContext,
 } from "./utils/test-app";
 
+/** Same host:port:password shape bullmq wants — duplicated per-file, same
+ * reasoning as every other parseRedisUrl in this codebase (bundled-vs-
+ * standalone ioredis version conflict); exact mirror of
+ * screening.e2e-spec.ts's own inspection-queue helper. */
+function parseRedisUrl(url: string) {
+  const parsed = new URL(url);
+  return { host: parsed.hostname, port: Number(parsed.port || 6379), password: parsed.password || undefined, maxRetriesPerRequest: null as null };
+}
+
 describe("Rules & Alerts module (e2e)", () => {
   let ctx: TestContext;
   let tenantAId: string;
   let tenantBId: string;
   let replayService: RuleReplayService;
   let alertsService: AlertsService;
+  let ruleEvaluationQueueService: RuleEvaluationQueueService;
   let appDataSource: DataSource;
+  let inspectionQueue: Queue;
 
   beforeAll(async () => {
     ctx = await createTestContext();
@@ -56,10 +70,17 @@ describe("Rules & Alerts module (e2e)", () => {
 
     replayService = ctx.app.get(RuleReplayService);
     alertsService = ctx.app.get(AlertsService);
+    ruleEvaluationQueueService = ctx.app.get(RuleEvaluationQueueService);
     appDataSource = ctx.app.get(DataSource);
+    // Independent inspection client — a real, second connection to the same
+    // queue, standing in for what a second apps/api replica's own
+    // RuleEvaluationQueueService instance would see, same convention as
+    // screening.e2e-spec.ts's asyncQueue.
+    inspectionQueue = new Queue(RULE_EVALUATION_QUEUE, { connection: parseRedisUrl(process.env.REDIS_URL!) });
   });
 
   afterAll(async () => {
+    await inspectionQueue.close();
     await closeTestContext(ctx);
   });
 
@@ -293,6 +314,56 @@ describe("Rules & Alerts module (e2e)", () => {
       const evalsAfter = await ctx.adminDataSource.getRepository(RuleEvaluationEntity).count({ where: { tenantId: tenantAId } });
       expect(alertsAfter).toBe(alertsBefore);
       expect(evalsAfter).toBe(evalsBefore);
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  describe("RuleEvaluationQueueService: idempotent enqueue across apps/api replicas", () => {
+    it("enqueuing the same transactionId twice creates exactly one BullMQ job, not two", async () => {
+      // Simulates the real multi-instance scenario this guards against:
+      // transaction.ingested is itself raised by TransactionIngestionQueueService's
+      // own QueueEvents bridge, which every live apps/api replica runs a copy of —
+      // Redis pub/sub fans that bridge's "completed" notification out to every
+      // subscriber, so N replicas each independently call
+      // TransactionListener.onTransactionIngested -> RuleEvaluationQueueService.enqueue
+      // for the SAME transaction. Two enqueue() calls with the same transactionId
+      // here stand in for two such replicas (this test's ctx.app is one "replica";
+      // a second call to the same DI-resolved service is behaviorally identical to
+      // a second replica's own instance calling .add() against the same Redis —
+      // BullMQ's dedup is enforced server-side in Redis, not client-side).
+      const transactionId = crypto.randomUUID();
+
+      const jobId1 = await ruleEvaluationQueueService.enqueue({ tenantId: tenantAId, transactionId });
+      const jobId2 = await ruleEvaluationQueueService.enqueue({ tenantId: tenantAId, transactionId });
+
+      // Before the fix, RuleEvaluationQueueService.enqueue() called queue.add()
+      // with no explicit jobId, so BullMQ auto-generates a fresh unique id on
+      // every call — this assertion alone would fail against the old code
+      // (jobId1 !== jobId2).
+      expect(jobId1).toBe(transactionId);
+      expect(jobId2).toBe(transactionId);
+
+      // The real proof, not just an id-equality coincidence: enumerate every
+      // job in the queue (across every state) whose data.transactionId matches
+      // and confirm there is exactly one, not two independent job entries.
+      const allJobs = await inspectionQueue.getJobs(["waiting", "active", "completed", "failed", "delayed", "paused"]);
+      const matching = allJobs.filter((j) => j.data.transactionId === transactionId);
+      expect(matching).toHaveLength(1);
+      expect(matching[0].data).toEqual({ tenantId: tenantAId, transactionId });
+    });
+
+    it("a different transactionId still gets its own independent job (dedup is per-transaction, not global)", async () => {
+      const transactionIdA = crypto.randomUUID();
+      const transactionIdB = crypto.randomUUID();
+
+      const jobIdA = await ruleEvaluationQueueService.enqueue({ tenantId: tenantAId, transactionId: transactionIdA });
+      const jobIdB = await ruleEvaluationQueueService.enqueue({ tenantId: tenantAId, transactionId: transactionIdB });
+
+      expect(jobIdA).not.toBe(jobIdB);
+      const jobA = await inspectionQueue.getJob(transactionIdA);
+      const jobB = await inspectionQueue.getJob(transactionIdB);
+      expect(jobA).toBeDefined();
+      expect(jobB).toBeDefined();
     });
   });
 
