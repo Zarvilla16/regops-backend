@@ -15,3 +15,7 @@ export * from "./entities/pep-details.entity";
 export * from "./entities/transaction.entity";
 export * from "./entities/customer-account.entity";
 export * from "./entities/ingestion-batch.entity";
+export * from "./entities/rule.entity";
+export * from "./entities/alert.entity";
+export * from "./entities/rule-evaluation.entity";
+export * from "./entities/rule-replay.entity";

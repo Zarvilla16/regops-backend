@@ -122,6 +122,10 @@ export enum ScreeningTrigger {
   SCHEDULED = "SCHEDULED",
   MANUAL = "MANUAL",
   UPDATE = "UPDATE",
+  /** Counterparty screening for the HIGH_RISK_COUNTERPARTY rule (Backend
+   * Prompt 5, Section 6.4) — added to screening_trigger_enum via
+   * RulesAndAlerts1700000050000's ALTER TYPE ADD VALUE. */
+  TRANSACTION_MONITORING = "TRANSACTION_MONITORING",
 }
 
 export enum MatchReviewStatus {
@@ -212,4 +216,55 @@ export enum IngestionBatchStatus {
 export enum UnknownCustomerMode {
   REJECT = "REJECT",
   AUTO_CREATE_STUB = "AUTO_CREATE_STUB",
+}
+
+// --- Rules & Alerts (Backend Prompt 5) --------------------------------------
+
+export enum RuleScenarioType {
+  LARGE_CASH = "LARGE_CASH",
+  STRUCTURING = "STRUCTURING",
+  RAPID_INFLOW_OUTFLOW = "RAPID_INFLOW_OUTFLOW",
+  HIGH_RISK_COUNTERPARTY = "HIGH_RISK_COUNTERPARTY",
+  VELOCITY_SPIKE = "VELOCITY_SPIKE",
+}
+
+export enum AlertSeverity {
+  LOW = "LOW",
+  MEDIUM = "MEDIUM",
+  HIGH = "HIGH",
+  CRITICAL = "CRITICAL",
+}
+
+export enum RuleAction {
+  FLAG = "FLAG",
+  REVIEW = "REVIEW",
+  BLOCK = "BLOCK",
+}
+
+export enum AlertStatus {
+  NEW = "NEW",
+  ASSIGNED = "ASSIGNED",
+  UNDER_REVIEW = "UNDER_REVIEW",
+  CLOSED = "CLOSED",
+  ESCALATED = "ESCALATED",
+}
+
+/** Recorded on Alert.closeCategory when status transitions to CLOSED (Section 9). */
+export enum AlertCloseCategory {
+  FALSE_POSITIVE = "FALSE_POSITIVE",
+  RESOLVED = "RESOLVED",
+}
+
+/** One row per (rule, transaction) evaluation — audit trail, RuleEvaluation entity. */
+export enum RuleEvaluationResultStatus {
+  FIRED = "FIRED",
+  NOT_FIRED = "NOT_FIRED",
+  ERROR = "ERROR",
+}
+
+export enum RuleReplayStatus {
+  QUEUED = "QUEUED",
+  RUNNING = "RUNNING",
+  COMPLETED = "COMPLETED",
+  FAILED = "FAILED",
 }

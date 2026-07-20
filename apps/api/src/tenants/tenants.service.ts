@@ -6,6 +6,7 @@ import { AuthUserContext, TenantStatus } from "@regops/shared";
 import { AuditService } from "../audit/audit.service";
 import { RiskFactorConfigService } from "../risk/config/risk-factor-config.service";
 import { ScreeningProviderConfigService } from "../screening/providers/screening-provider-config.service";
+import { RulesService } from "../rules/rules.service";
 import { CreateTenantDto } from "./dto/create-tenant.dto";
 import { RequestMeta } from "../users/users.service";
 
@@ -16,6 +17,7 @@ export class TenantsService {
     private readonly auditService: AuditService,
     private readonly riskFactorConfigService: RiskFactorConfigService,
     private readonly screeningProviderConfigService: ScreeningProviderConfigService,
+    private readonly rulesService: RulesService,
     private readonly configService: ConfigService,
   ) {}
 
@@ -77,6 +79,12 @@ export class TenantsService {
       // env; SmileId primary + Prembly fallback in prod env."
       const isProd = this.configService.get<string>("nodeEnv") === "production";
       await this.screeningProviderConfigService.seedDefaultsForTenant(queryRunner, tenant.id, isProd);
+
+      // Section 5.4: every new tenant gets the five default Rule rows
+      // (LARGE_CASH/STRUCTURING/RAPID_INFLOW_OUTFLOW/HIGH_RISK_COUNTERPARTY/
+      // VELOCITY_SPIKE) — a TENANT_ADMIN can tune config afterward via
+      // PATCH /rules/:id without any code change.
+      await this.rulesService.seedDefaultsForTenant(queryRunner, tenant.id);
 
       await this.auditService.record(queryRunner, {
         tenantId: tenant.id,

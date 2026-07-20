@@ -12,6 +12,7 @@ import { Test } from "@nestjs/testing";
 import * as argon2 from "argon2";
 import { DataSource } from "typeorm";
 import {
+  AlertEntity,
   AuditLogEntity,
   CustomerAccountEntity,
   CustomerEntity,
@@ -20,6 +21,9 @@ import {
   RefreshTokenEntity,
   RiskFactorConfigEntity,
   RiskScoreHistoryEntity,
+  RuleEntity,
+  RuleEvaluationEntity,
+  RuleReplayEntity,
   ScreeningCheckEntity,
   ScreeningMatchEntity,
   ScreeningProviderConfigEntity,
@@ -29,6 +33,7 @@ import {
 } from "@regops/db";
 import { ScreeningCheckType, ScreeningProviderName, TenantStatus, TenantType, UserRole, UserStatus } from "@regops/shared";
 import { DEFAULT_RISK_FACTOR_CONFIGS } from "@regops/risk-engine";
+import { DEFAULT_RULE_CONFIGS } from "@regops/rules-engine";
 import { AppModule } from "../../src/app.module";
 import { configureApp } from "../../src/main";
 
@@ -80,6 +85,10 @@ export async function createTestContext(): Promise<TestContext> {
       TransactionEntity,
       CustomerAccountEntity,
       IngestionBatchEntity,
+      RuleEntity,
+      AlertEntity,
+      RuleEvaluationEntity,
+      RuleReplayEntity,
     ],
   });
   await adminDataSource.initialize();
@@ -225,4 +234,37 @@ export async function seedScreeningProviderConfigsFixture(
       );
     }
   }
+}
+
+/**
+ * Same reasoning as seedRiskFactorConfigsFixture — createTenantFixture
+ * bypasses TenantsService.create(), so it doesn't get the default Rule rows
+ * real tenant creation seeds (RulesService.seedDefaultsForTenant). Pass
+ * `overrides` keyed by scenario_type to tweak a specific scenario's config
+ * for a test (e.g. a lower LARGE_CASH threshold so a small fixture amount
+ * still crosses it).
+ */
+export async function seedRuleCatalogFixture(
+  ds: DataSource,
+  tenantId: string,
+  overrides?: Partial<Record<string, Record<string, unknown>>>,
+): Promise<RuleEntity[]> {
+  const repo = ds.getRepository(RuleEntity);
+  const saved: RuleEntity[] = [];
+  for (const defaults of DEFAULT_RULE_CONFIGS) {
+    const rule = await repo.save(
+      repo.create({
+        tenantId,
+        name: defaults.name,
+        scenarioType: defaults.scenarioType,
+        description: defaults.description,
+        config: { ...defaults.config, ...overrides?.[defaults.scenarioType] },
+        severity: defaults.severity,
+        action: defaults.action,
+        isActive: true,
+      }),
+    );
+    saved.push(rule);
+  }
+  return saved;
 }

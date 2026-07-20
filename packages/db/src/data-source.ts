@@ -17,6 +17,10 @@ import { PepDetailsEntity } from "./entities/pep-details.entity";
 import { TransactionEntity } from "./entities/transaction.entity";
 import { CustomerAccountEntity } from "./entities/customer-account.entity";
 import { IngestionBatchEntity } from "./entities/ingestion-batch.entity";
+import { RuleEntity } from "./entities/rule.entity";
+import { AlertEntity } from "./entities/alert.entity";
+import { RuleEvaluationEntity } from "./entities/rule-evaluation.entity";
+import { RuleReplayEntity } from "./entities/rule-replay.entity";
 
 dotenv.config();
 
@@ -37,6 +41,10 @@ export const entities = [
   TransactionEntity,
   CustomerAccountEntity,
   IngestionBatchEntity,
+  RuleEntity,
+  AlertEntity,
+  RuleEvaluationEntity,
+  RuleReplayEntity,
 ];
 
 /**

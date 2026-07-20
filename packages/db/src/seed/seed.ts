@@ -6,8 +6,10 @@ import { TenantEntity } from "../entities/tenant.entity";
 import { UserEntity } from "../entities/user.entity";
 import { RiskFactorConfigEntity } from "../entities/risk-factor-config.entity";
 import { ScreeningProviderConfigEntity } from "../entities/screening-provider-config.entity";
+import { RuleEntity } from "../entities/rule.entity";
 import { ScreeningCheckType, ScreeningProviderName, TenantStatus, TenantType, UserRole, UserStatus } from "@regops/shared";
 import { DEFAULT_RISK_FACTOR_CONFIGS } from "@regops/risk-engine";
+import { DEFAULT_RULE_CONFIGS } from "@regops/rules-engine";
 
 dotenv.config();
 
@@ -77,6 +79,27 @@ async function seedRiskFactorConfigs(tenantId: string): Promise<void> {
   }
 }
 
+/** Idempotent — safe to re-run against a tenant that's already been seeded. */
+async function seedRuleCatalog(tenantId: string): Promise<void> {
+  const repo = AppDataSource.getRepository(RuleEntity);
+  for (const defaults of DEFAULT_RULE_CONFIGS) {
+    const existing = await repo.findOne({ where: { tenantId, scenarioType: defaults.scenarioType } });
+    if (existing) continue;
+    await repo.save(
+      repo.create({
+        tenantId,
+        name: defaults.name,
+        scenarioType: defaults.scenarioType,
+        description: defaults.description,
+        config: defaults.config,
+        severity: defaults.severity,
+        action: defaults.action,
+        isActive: true,
+      }),
+    );
+  }
+}
+
 /**
  * Seeding runs as regops_admin (BYPASSRLS), so no tenant session var needs to
  * be set here — RLS only constrains the regops_app role used by the API.
@@ -103,6 +126,7 @@ async function seed(): Promise<void> {
   }
   await seedRiskFactorConfigs(platformTenant.id);
   await seedScreeningProviderConfigs(platformTenant.id);
+  await seedRuleCatalog(platformTenant.id);
 
   let superAdmin = await userRepo.findOne({
     where: { tenantId: platformTenant.id, email: SUPER_ADMIN_EMAIL },
@@ -136,6 +160,7 @@ async function seed(): Promise<void> {
   }
   await seedRiskFactorConfigs(demoTenant.id);
   await seedScreeningProviderConfigs(demoTenant.id);
+  await seedRuleCatalog(demoTenant.id);
 
   const demoTenantAdminEmail = "admin@demomfb.dev";
   let tenantAdmin = await userRepo.findOne({

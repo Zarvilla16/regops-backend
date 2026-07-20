@@ -1,6 +1,9 @@
 import {
   AccountStatus,
   AccountType,
+  AlertCloseCategory,
+  AlertSeverity,
+  AlertStatus,
   CustomerStatus,
   CustomerType,
   IngestionBatchStatus,
@@ -10,6 +13,10 @@ import {
   PepStatus,
   RiskFactorType,
   RiskLevel,
+  RuleAction,
+  RuleEvaluationResultStatus,
+  RuleReplayStatus,
+  RuleScenarioType,
   ScoreTrigger,
   ScreeningCheckStatus,
   ScreeningCheckType,
@@ -307,4 +314,74 @@ export interface VelocityStatsDto {
   customerId: string;
   score: number;
   detail: Record<string, unknown>;
+}
+
+// --- Rules & Alerts (Backend Prompt 5) --------------------------------------
+
+export interface RuleDto {
+  id: string;
+  tenantId: string;
+  name: string;
+  scenarioType: RuleScenarioType;
+  description: string | null;
+  config: Record<string, unknown>;
+  severity: AlertSeverity;
+  action: RuleAction;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AlertDto {
+  id: string;
+  tenantId: string;
+  ruleId: string;
+  customerId: string;
+  triggeringTransactionId: string | null;
+  scenarioType: RuleScenarioType;
+  severity: AlertSeverity;
+  status: AlertStatus;
+  title: string;
+  evidence: Record<string, unknown>;
+  dedupKey: string;
+  fireCount: number;
+  firstFiredAt: string;
+  lastFiredAt: string;
+  assignedTo: string | null;
+  closedAt: string | null;
+  closedBy: string | null;
+  closeCategory: AlertCloseCategory | null;
+  closureReason: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RuleEvaluationDto {
+  id: string;
+  tenantId: string;
+  ruleId: string;
+  transactionId: string | null;
+  evaluatedAt: string;
+  durationMs: number;
+  result: RuleEvaluationResultStatus;
+  alertId: string | null;
+  errorMessage: string | null;
+}
+
+export interface RuleReplayDto {
+  id: string;
+  tenantId: string;
+  ruleId: string | null;
+  fromDate: string;
+  toDate: string;
+  dryRun: boolean;
+  status: RuleReplayStatus;
+  totalTransactions: number;
+  processedTransactions: number;
+  firedCount: number;
+  reportKey: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  errorMessage: string | null;
+  createdAt: string;
 }

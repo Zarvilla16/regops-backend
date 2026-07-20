@@ -9,7 +9,8 @@
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "jest --config jest.config.js",
-    "test:e2e": "jest --config jest-e2e.config.js"
+    "test:e2e": "jest --config jest-e2e.config.js",
+    "cli:rule-replay": "ts-node src/rules/replay/rule-replay.cli.ts"
   },
   "dependencies": {
     "@nestjs/common": "^10.4.15",
@@ -25,6 +26,7 @@
     "@regops/db": "workspace:*",
     "@regops/file-storage": "workspace:*",
     "@regops/risk-engine": "workspace:*",
+    "@regops/rules-engine": "workspace:*",
     "@regops/screening-engine": "workspace:*",
     "@regops/shared": "workspace:*",
     "argon2": "^0.41.1",

@@ -1303,3 +1303,216 @@ test was specifically designed to catch, and did; #22 (a controller-registration
 on `GET /transactions/batches`) was found only by the live manual walkthrough, not by the automated
 suite, and is now fixed with its own regression test. Item 15's audit-action-naming gap is the one
 remaining honest incompletion worth a reader's attention before assuming full literal-spec parity.
+
+### Backend Prompt 5 (Rules Engine & Alerts) adds
+
+The five deterministic AML scenarios, the alert lifecycle, and a CLI backfill tool — the centerpiece
+of the v1 product per the spec's own framing. Built on top of Prompt 4 with no changes to its
+guarantees.
+
+- **New workspace package `packages/rules-engine`** (framework-free, mirrors `packages/risk-engine`/
+  `packages/screening-engine`'s split): five pure evaluator functions (`evaluateLargeCash`,
+  `evaluateStructuring`, `evaluateRapidInflowOutflow`, `evaluateHighRiskCounterparty`,
+  `evaluateVelocitySpike`), each taking a structural `EvaluationContext` (TypeORM-free mirrors of
+  `TransactionEntity`/`CustomerEntity`) plus pre-fetched, scenario-specific facts, returning a fired/
+  evidence/severity/dedupKey result. `dispatchEvaluation()` is the spec's "EvaluatorRegistry,"
+  implemented as a switch-dispatch function rather than a DI-registered class map (see Deviations).
+  `DEFAULT_RULE_CONFIGS` mirrors `DEFAULT_RISK_FACTOR_CONFIGS`'s seeding pattern. 41 unit tests
+  covering the full Section 11.1 positive/negative matrix, 80%+ branch coverage.
+- **`packages/db`**: `rule`, `alert`, `rule_evaluation` (RANGE-partitioned monthly by `evaluated_at`,
+  identical mechanism to `TransactionEntity` — same idempotent partition-creation-function pattern,
+  same per-partition RLS re-application trap re-applied), and `rule_replay` (plain, mirrors
+  `IngestionBatchEntity`'s progress-tracking shape) — all in
+  `RulesAndAlerts1700000050000`. `alert`'s `dedup_key` uniqueness is a **partial** unique index
+  (`WHERE status != 'CLOSED'`), which both enforces Section 3.2's "closed alerts can recur" rule and
+  is the exact conflict target `AlertsService.createOrIncrement`'s `INSERT ... ON CONFLICT` targets.
+  `seed.ts` now seeds the 5 default `Rule` rows for every tenant it creates.
+- **`apps/api/src/rules`**: `RulesService` (CRUD, `PATCH /rules/:id` with the disable-reason and
+  loosening-confirmation guardrails, `POST /rules/:id/test` dry-run), `AlertsService` (the
+  create-or-increment UPSERT, list/filter/assign/close/related-transactions),
+  `RuleFactsService`/`EvaluatorFactsGatheringService` (the DB-query layer packages/rules-engine
+  deliberately has no dependency on — one shared switch-dispatch used by both the real async
+  evaluation path and the dry-run test endpoint, so a dry run means what it says),
+  `CounterpartyScreeningService` (wraps `ScreeningService` from Prompt 3 with a 7-day Redis cache,
+  borrowing a BullMQ connection the same way `TransactionIngestionQueueService.acquireLock` does),
+  `RuleEvaluationOrchestratorService` (the real per-transaction, per-rule evaluation loop — every
+  rule wrapped in its own try/catch so one throwing/slow evaluator never blocks or skips the
+  others' `RuleEvaluation` rows), a hand-rolled BullMQ producer/consumer pair
+  (`RuleEvaluationQueueService`/`RuleEvaluationConsumerService`) on `RULE_EVALUATION_QUEUE`, a
+  `TransactionListener` (`@OnEvent("transaction.ingested")`, enqueues one job per transaction, no
+  debounce — unlike `RiskModule`'s re-score debounce, every transaction genuinely needs its own
+  evaluation), and `RuleReplayService` + `rule-replay.cli.ts` (Section 10's backfill tool — a plain
+  `NestFactory.createApplicationContext` script, since this codebase has never depended on
+  nest-commander; `pnpm --filter @regops/api cli:rule-replay -- --tenant=<id> [--rule=<id>]
+  --from=YYYY-MM-DD --to=YYYY-MM-DD [--dry-run]`).
+- `TenantsService.create()` now also calls `RulesService.seedDefaultsForTenant()`, same pattern as
+  the existing risk-factor-config and screening-provider-config seeding calls.
+- 24 new `apps/api` e2e tests (`test/rules.e2e-spec.ts`) plus 1 new unit spec
+  (`src/rules/loosening.spec.ts`) — `apps/api`'s e2e suite is up to 113 (from 89).
+
+### Deviations from the Backend Prompt 5 spec (and why)
+
+1. **The `evaluate-rules` BullMQ consumer runs inside `apps/api`, not `apps/worker`, contradicting
+   Section 4's file tree** (`apps/worker/src/rules/evaluate-rules.processor.ts`). Two independent
+   reasons converge on this: (a) the spec's own orchestration pseudocode (Section 5.2) uses NestJS's
+   `@Processor`/`WorkerHost`/injected-services style, which is only meaningful inside a Nest DI
+   container — `apps/worker` is, and has always been, a plain Node process with no DI (see Prompt
+   4's own deviations); (b) the `HIGH_RISK_COUNTERPARTY` evaluator needs `ScreeningService`
+   (Prompt 3's provider-strategy screening engine, with its internal-blacklist/mock-provider/
+   fallback logic) — reimplementing that in a second, framework-free copy just for `apps/worker`
+   would drift from Prompt 3's real semantics and roughly double the screening surface area to
+   maintain. Running the consumer inside `apps/api` resolves both: it's still a genuine, independent
+   `bullmq` `Worker` (hand-rolled, matching every other queue integration in this codebase —
+   `TransactionIngestionQueueService`, `AsyncScreeningQueueService` — never `@nestjs/bullmq`, which
+   this project has never depended on), still asynchronous and decoupled from the ingestion
+   request/response cycle, just not a second OS process. One consequence, discovered and confirmed
+   by a live manual walkthrough (not just the automated suite): if more than one `apps/api` instance
+   runs (e.g. two `pnpm dev` processes, or N replicas in production), **each instance's own
+   `QueueEvents` bridge independently observes the same `transaction.ingested` completion** (Redis
+   pub/sub fans out to every subscriber) and enqueues its own `rule-evaluation` job — i.e. the same
+   transaction gets evaluated N times, not once. This is not a bug in the alert layer: the
+   dedup-key UPSERT correctly collapses the resulting duplicate fires into one `Alert` row with an
+   incremented `fire_count` (verified live: two independent `apps/api` processes running
+   concurrently during this session's manual walkthrough produced exactly one `Alert`, `fire_count =
+   2`), but it does mean `RuleEvaluation` audit rows are written once per live instance, not once
+   per transaction — a real, disclosed multi-instance scaling cost of this deviation, not a
+   correctness bug.
+2. **The replay progress table (`rule_replay`) is checked, but `RuleReplayService.replay()` is
+   awaited synchronously by its only caller (the CLI), not fire-and-forget.** The spec's Section
+   10.3 implies an async trigger + poll model (`GET /rules/replays/:replayId` for progress while a
+   long backfill runs in the background). There is, however, no HTTP endpoint anywhere in the spec
+   that *starts* a replay — only the CLI does, and only `GET /rules/replays/:replayId` (implemented)
+   observes it. A CLI process that fire-and-forgets its own work and then calls
+   `NestFactory`'s `app.close()` would kill that work mid-run (a real bug caught before it shipped —
+   see Known Issues). So `replay()` creates the tracking row, then awaits the actual backfill before
+   returning; the tracking row is still visible to a *concurrently running* `apps/api` HTTP process's
+   `GET /rules/replays/:replayId` for the whole duration, which is what the polling endpoint is
+   actually for.
+3. **Dedup-key "rolling window anchored to the first qualifying transaction" (Sections 6.2/6.3's
+   literal wording) is implemented as fixed calendar/interval bucketing instead** (a UTC-day bucket
+   for `STRUCTURING`/`HIGH_RISK_COUNTERPARTY`/`VELOCITY_SPIKE`, a fixed N-minute interval index for
+   `RAPID_INFLOW_OUTFLOW`) — see `packages/rules-engine/src/dedup.ts`'s docblock. A truly
+   first-transaction-anchored rolling window needs state (when did the current window start?) that a
+   stateless, per-transaction evaluation doesn't have without an extra DB round trip per rule per
+   transaction. Calendar bucketing is idempotent (replay-safe, matches the codebase's UPSERT-based
+   dedup model exactly) at the cost of a pattern spanning a bucket boundary (e.g. just before/after
+   UTC midnight) producing two `Alert` rows instead of one — a disclosed, minor precision loss, not a
+   correctness gap in the underlying detection.
+4. **`VELOCITY_SPIKE`'s raw-stats query (`RuleFactsService.fetchVelocityRawStats`) duplicates
+   `VelocityAdapterService`'s day-grouped-by-`occurred_at` SQL shape (Prompt 4) rather than reusing
+   it.** `VelocityAdapterService.getStats()` returns a risk *score* (`TransactionVelocityFactor`'s
+   shape: `{score, detail}`), not the raw `rollingDailyAvg30d`/`spikeRatio`/`dormancyDays` numbers
+   Section 6.5's evaluator needs — refactoring Prompt 4's stable, already-tested code to expose both
+   shapes from one query was judged higher-risk than a small, contained duplication, consistent with
+   this codebase's general preference (documented repeatedly in earlier prompts) for duplication over
+   a risky shared-runtime refactor.
+5. **`GET /rules`/`GET /rules/:id`/`POST /rules/:id/test` request/response bodies have no declared
+   Swagger schema fields** — the same `@nestjs/swagger` CLI-plugin gap every prior prompt's
+   list/detail endpoints already have. Filtering/behavior is correct (verified by e2e tests); it
+   can't be driven from typed Swagger fields yet.
+6. **The frontend's mock-data API layer (`apps/web/src/lib/mock-data/routes.ts`) was not reconciled
+   against this real backend in this session** — same "backend ships first, frontend re-pointed in a
+   later pass" pattern already used for Prompts 1-4 (see the "Fix real-backend list response shape
+   mismatch across 17 call sites" commit that did this for earlier prompts). The frontend's
+   `MockRule.config` shape (`{key, label, value, unit}[]`) and its client-side-only
+   `LOOSENS_ON_INCREASE` loosening-confirmation table differ from this backend's plain
+   `Record<string, unknown>` config and its now-real, server-side-enforced
+   `X-Confirm-Loosening` guardrail — reconciling those is a contained follow-up, not a redesign,
+   since the semantics (which fields loosen on increase) already agree field-for-field.
+
+### Known issues / incomplete items (Backend Prompt 5)
+
+- **Multi-instance `apps/api` duplicate rule evaluation** (Deviations #1) — each live `apps/api`
+  process independently enqueues a `rule-evaluation` job per `transaction.ingested` completion it
+  observes via its own `QueueEvents` bridge. Alert-level correctness is unaffected (UPSERT dedup
+  collapses it), but `RuleEvaluation` audit-row volume and rule-evaluation queue load both scale
+  with instance count, not transaction count. Fixing this properly (e.g. one instance elected/locked
+  as the sole `QueueEvents` listener, or moving the bridge itself into a single-instance component)
+  is a real v2 item, not something papered over here.
+- **No literal fault-injection test for "one rule throwing an error does not prevent other rules
+  from firing" (Section 11.2)** — the per-rule try/catch in `RuleEvaluationOrchestratorService`
+  structurally guarantees this (every rule's evaluation is independently wrapped, and a thrown error
+  is caught and recorded as a `RuleEvaluation` row with `result = ERROR` rather than propagating),
+  and the "disabled rule is not evaluated" / "all 5 rules produce a RuleEvaluation row" tests do
+  exercise the same loop, but no test artificially throws inside one evaluator to observe the other
+  four still firing. Flagged honestly rather than silently assumed covered.
+- **The CLI's own argument validation (`--tenant` required, etc.) has no automated test** — verified
+  manually (`pnpm cli:rule-replay` with no args prints usage and exits 1), not via an automated
+  subprocess-spawning test, since `apps/api`'s e2e suite has no existing precedent for testing a CLI
+  entry point as a black box (only `RuleReplayService`'s actual replay logic is tested, directly,
+  which is where the real risk was).
+- **`GET /rules`/`GET /rules/:id`/`POST /rules/:id/test` Swagger schema gap** — see Deviations #5.
+- **Frontend not reconciled** — see Deviations #6.
+- ~~No `docs/testing/prompt-5-swagger-test-guide.md`~~ — **resolved in a follow-up session**:
+  `docs/testing/prompt-5-swagger-test-guide.md` now exists, hand-walked against a live
+  `docker-compose up -d` + `pnpm dev` instance the same way every prior prompt's guide was (every
+  response body, status code, and dedup/fire-count number recorded is a real one from that run, not
+  inferred). Covers: all 5 scenarios firing via real webhook-ingested transactions with a live check
+  that each alert's `title`/`evidence` genuinely reads as a clear, self-contained description;
+  same-day dedup on `STRUCTURING` (`fireCount` 1→2, `relatedTransactionIds` merging without
+  duplicates); the `X-Confirm-Loosening` guardrail (`422` without it, `200` with it, no header needed
+  when tightening, real audit-log before/after diff); the replay CLI in both modes (dry-run produces
+  a CSV and writes nothing, live mode increments the same alert twice across two separate runs); and
+  tenant isolation (a freshly created tenant gets its own 5 rules with distinct ids, `404` not `403`
+  on cross-tenant direct-id access, a real transaction fired in one tenant never surfaces in
+  another's `GET /alerts`). Walking it live surfaced two more genuine findings, neither a bug: **(1)**
+  a tenant created *before* this prompt shipped has zero `Rule` rows — seeding only runs at
+  tenant-creation time, with no retroactive backfill, confirmed directly against an old "Guide Test
+  Tenant B" left over from Prompt 4's own guide; **(2)** in the `VELOCITY_SPIKE` walkthrough, the
+  resulting alert's `fireCount` was `7`, not `1` — every row in an 11-row (6 history + spike, tuned
+  down to 7 rows for this guide) ingestion batch independently emits its own `transaction.ingested`
+  event and, since velocity evaluation reads "today's total" in real time and all rows land before
+  any evaluation runs, all 7 independently observe the already-committed spike and fire, collapsing
+  into one alert via the same dedup key. Documented explicitly in the guide so a reader doesn't
+  mistake it for a duplicate-alert bug.
+
+### Definition of Done — Backend Prompt 5 — verified vs. not verified
+
+| # | Item | Status |
+|---|---|---|
+| 1 | Migration applies cleanly, monthly partitions for `rule_evaluation` | ✅ Verified — `pnpm db:migrate` against live Postgres |
+| 2 | Default `Rule` rows seeded for every new tenant | ✅ Verified — `seed.ts` re-run against live Postgres, `SELECT * FROM rule` confirms 5 rows/tenant; also covered by `TenantsService.create()`'s call to `seedDefaultsForTenant` |
+| 3 | All 5 evaluators implemented and registered | ✅ Verified — `packages/rules-engine`, 41 unit tests covering Section 11.1's full matrix; `dispatchEvaluation()` is the registry |
+| 4 | `evaluate-rules` BullMQ processor consuming `transaction.ingested` | ✅ Verified — real, independent `bullmq` `Worker`; runs inside `apps/api` not `apps/worker` (Deviations #1); exercised **twice**: once via the automated e2e suite calling the orchestrator directly (deterministic), once via a full live manual walkthrough (webhook → real `apps/worker` ingestion → real `QueueEvents` bridge → real enqueue → real consumer → real `Alert`) |
+| 5 | Alert UPSERT semantics verified by the concurrent race test | ✅ Verified — `alert dedup race safety` describe block: two concurrent `createOrIncrement` calls on the same dedup key produce exactly one `Alert` with `fire_count = 2`; also incidentally re-confirmed live by the multi-instance duplicate-evaluation scenario in Deviations #1 |
+| 6 | Counterparty screening cache working with 7-day TTL | ✅ Verified — both the internal-counterparty path (no external call at all) and the external-counterparty path are e2e-tested; the external test asserts `screening_check` row count is identical after a second evaluation of the same counterparty (bank+account), confirming the cache genuinely short-circuits the provider call, not just that a value is stored |
+| 7 | `alert.created`, `alert.escalated`, `alert.critical_fired` events emitted correctly | ✅ Verified by code path (`RuleEvaluationOrchestratorService.emitAlertEvents`) — no dedicated `EventEmitter2` spy test asserting the exact event names/payloads in this session |
+| 8 | Rule update endpoints with the loosening confirmation guardrail | ✅ Verified — e2e: disable-without-reason 400, loosening-without-header 422, loosening-with-header 200, tightening never needs the header, before/after config diff on the audit row |
+| 9 | CLI replay command working in dry-run and live modes | ✅ Verified — `RuleReplayService.replay()` exercised directly (dry-run produces a CSV report and zero DB writes; live mode creates alerts and increments `fire_count` on re-run); the CLI script itself verified by direct invocation, not an automated test (see Known Issues) |
+| 10 | Audit log entries: `rule.update`, `rule.disable`, `alert.create`, `alert.assign`, `alert.close`, `alert.escalate` | ✅ Verified — e2e assertions query `audit_log` directly for `rule.disable` and `alert.close`; `rule.update`, `alert.create`, `alert.assign`, and `alert.close` were additionally confirmed live against a real Postgres instance while hand-walking `docs/testing/prompt-5-swagger-test-guide.md` (Sections 8 and 10) — `alert.escalate` is written by the same `AuditService.record()` call site as the others, confirmed by code review rather than a direct query |
+| 11 | Per-scenario unit tests cover the Section 11.1 matrix | ✅ Verified — 41 tests in `packages/rules-engine`, every listed positive/negative case present |
+| 12 | Integration tests (Sections 11.2-11.6) pass | ✅ Mostly verified — orchestration, dedup/race, tenant isolation, rule-update guardrails, and replay are all covered (24 e2e tests); the fault-injection sub-case of 11.2 is the one disclosed gap (see Known Issues) |
+| 13 | Performance targets (Section 11.7) | ⬜ Not verified — no load test run in this session; the per-transaction evaluation loop is 5 sequential, indexed queries plus one UPSERT, well within the spec's p99 < 250ms budget on the evidence of individual e2e test timings (all well under 250ms), but no dedicated 10k-transaction benchmark was run |
+| 14 | All previous tests (Prompts 1-4) still green | ✅ Verified — full `pnpm lint && pnpm typecheck && pnpm build && pnpm test && pnpm test:e2e` run at the repo root: every task green (`apps/api` e2e 113/113 across 9 suites, `apps/worker` e2e 27/27 across 5 non-benchmark suites) |
+| 15 | Swagger covers all new endpoints | ✅ Verified minimally (`@ApiTags`/`@ApiBearerAuth` only, matching house style — see Known Issues); additionally, `docs/testing/prompt-5-swagger-test-guide.md` (added in a follow-up session, see Known Issues) hand-walks every endpoint against a live server, the same bar every prior prompt's guide was held to |
+| 16 | CI green | ⬜ Not verified in this session — no CI run observed |
+
+**Bottom line**: all 5 scenarios fire correctly against real Postgres data (not just the pure-function
+unit tests — the e2e suite inserts real transaction rows and calls the real orchestrator), the alert
+UPSERT is genuinely race-safe, and the loosening-confirmation guardrail is real, server-side
+enforcement, not just the frontend's existing client-side checkbox. A real bug was found and fixed
+this session, the same way Prompt 4's bugs were: **an established customer's very first-ever
+transaction was misclassified as a "dormancy reactivation" velocity spike**, because "no prior
+activity in the queried window" and "genuinely dormant for the full window" produced the same
+`dormancyDays` value with nothing to tell them apart — caught by the e2e suite (a hand-crafted
+pure-unit-test fixture would never have hit this, since it directly supplied `dormancyDays` without
+going through the real query), fixed by adding an explicit `hasPriorActivityInWindow` signal, and
+covered by both a new e2e assertion and a new pure-unit regression test. A second, more interesting
+discovery came from the live manual walkthrough, not the automated suite: running two `apps/api`
+instances against the same Redis (an accidental artifact of a leftover background `pnpm dev` process
+from earlier in the session, not something deliberately arranged) causes each to independently
+enqueue and evaluate the same transaction — exactly the kind of multi-instance condition an
+automated single-process test suite cannot surface on its own — and confirmed, live, that the
+dedup-key UPSERT handles it correctly (one `Alert`, `fire_count = 2`) even though it wasn't the
+scenario the race test was originally written for. Two disclosed gaps remain before assuming full
+literal-spec parity: no dedicated fault-injection test for one-rule-throws-others-still-fire
+(Known Issues), and the frontend has not yet been re-pointed at this real backend (Deviations #6).
+
+**Follow-up session**: `docs/testing/prompt-5-swagger-test-guide.md` now exists, hand-walked against
+a live server the same way every prior prompt's guide was (see Known Issues for the full rundown).
+It found two more genuine, non-bug findings the automated suite's own design couldn't have surfaced
+the same way: a tenant created before this prompt shipped has zero `Rule` rows (no retroactive
+seeding backfill), and a multi-row ingestion batch touching `VELOCITY_SPIKE` produces a `fireCount`
+equal to the batch size, not `1`, because every row's own `transaction.ingested` event independently
+observes the already-committed spike. Both are explained in the guide at the exact point a reader
+would otherwise assume a bug.

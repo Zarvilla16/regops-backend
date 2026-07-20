@@ -13,3 +13,11 @@ export const RESCREEN_QUEUE = "rescreen";
  * the shared IngestionService processor doesn't care which producer added
  * the job, only the IngestionBatch row referenced by jobData.batchId. */
 export const TRANSACTION_INGESTION_QUEUE = "transaction-ingestion";
+/** Consumed in-process by apps/api itself (RuleEvaluationConsumerService),
+ * not apps/worker — see packages/rules-engine's docblock / HANDOFF.md
+ * Prompt 5 deviations for why: the HIGH_RISK_COUNTERPARTY evaluator needs
+ * ScreeningService (Prompt 3's provider-strategy screening engine), which
+ * only exists inside apps/api's NestJS DI container. Still a real,
+ * independent BullMQ Queue/Worker — genuinely decoupled and asynchronous
+ * from the ingestion request/response cycle, just not a second OS process. */
+export const RULE_EVALUATION_QUEUE = "rule-evaluation";
