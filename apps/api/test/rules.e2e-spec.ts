@@ -8,7 +8,6 @@ import {
   RuleEntity,
   RuleEvaluationEntity,
   RuleReplayEntity,
-  ScreeningCheckEntity,
   TransactionEntity,
 } from "@regops/db";
 import {
@@ -16,7 +15,6 @@ import {
   AlertSeverity,
   AlertStatus,
   CustomerType,
-  RuleEvaluationResultStatus,
   RuleReplayStatus,
   RuleScenarioType,
   TransactionChannel,
@@ -24,7 +22,6 @@ import {
   TransactionType,
   UserRole,
 } from "@regops/shared";
-import { RuleEvaluationOrchestratorService } from "../src/rules/evaluation/rule-evaluation-orchestrator.service";
 import { RuleReplayService } from "../src/rules/replay/rule-replay.service";
 import { AlertsService } from "../src/rules/alerts/alerts.service";
 import {
@@ -42,7 +39,6 @@ describe("Rules & Alerts module (e2e)", () => {
   let ctx: TestContext;
   let tenantAId: string;
   let tenantBId: string;
-  let orchestrator: RuleEvaluationOrchestratorService;
   let replayService: RuleReplayService;
   let alertsService: AlertsService;
   let appDataSource: DataSource;
@@ -58,7 +54,6 @@ describe("Rules & Alerts module (e2e)", () => {
     await seedRuleCatalogFixture(ctx.adminDataSource, tenantAId);
     await seedRuleCatalogFixture(ctx.adminDataSource, tenantBId);
 
-    orchestrator = ctx.app.get(RuleEvaluationOrchestratorService);
     replayService = ctx.app.get(RuleReplayService);
     alertsService = ctx.app.get(AlertsService);
     appDataSource = ctx.app.get(DataSource);
@@ -135,6 +130,50 @@ describe("Rules & Alerts module (e2e)", () => {
 
   async function findRule(tenantId: string, scenarioType: RuleScenarioType): Promise<RuleEntity> {
     return ctx.adminDataSource.getRepository(RuleEntity).findOneOrFail({ where: { tenantId, scenarioType } });
+  }
+
+  /** Used by tests that need a real Alert row without going through a full
+   * rule evaluation — that real, end-to-end evaluation loop now runs in
+   * apps/worker (evaluateTransaction) and is covered there; see
+   * apps/worker/test/rules.e2e-spec.ts. */
+  async function withQr<T>(tenantId: string, fn: (qr: QueryRunner) => Promise<T>): Promise<T> {
+    const qr = appDataSource.createQueryRunner();
+    await qr.connect();
+    await qr.startTransaction();
+    try {
+      await qr.query(`SELECT set_config('app.current_tenant_id', $1, true), set_config('app.bypass_rls', 'false', true)`, [tenantId]);
+      const result = await fn(qr);
+      await qr.commitTransaction();
+      return result;
+    } catch (err) {
+      if (qr.isTransactionActive) await qr.rollbackTransaction();
+      throw err;
+    } finally {
+      await qr.release();
+    }
+  }
+
+  async function seedAlert(
+    tenantId: string,
+    customerId: string,
+    transactionId: string,
+    scenarioType: RuleScenarioType,
+  ): Promise<AlertEntity> {
+    const rule = await findRule(tenantId, scenarioType);
+    const outcome = await withQr(tenantId, (qr) =>
+      alertsService.createOrIncrement(qr, {
+        tenantId,
+        rule,
+        customerId,
+        triggeringTransactionId: transactionId,
+        severity: AlertSeverity.MEDIUM,
+        title: "Test-seeded alert",
+        evidence: { relatedTransactionIds: [transactionId] },
+        dedupKey: `${scenarioType}:${customerId}:${transactionId}`,
+        firedAt: new Date(),
+      }),
+    );
+    return outcome.alert;
   }
 
   // ---------------------------------------------------------------------
@@ -258,231 +297,7 @@ describe("Rules & Alerts module (e2e)", () => {
   });
 
   // ---------------------------------------------------------------------
-  describe("orchestrator: real per-scenario evaluation against Postgres", () => {
-    it("LARGE_CASH fires on a 6M cash CREDIT", async () => {
-      const customer = await createCustomer(tenantAId);
-      const txn = await createTransaction(tenantAId, customer.id, { channel: TransactionChannel.CASH, amount: "6000000" });
-
-      await orchestrator.evaluateTransaction(tenantAId, txn.id);
-
-      const alert = await ctx.adminDataSource
-        .getRepository(AlertEntity)
-        .findOne({ where: { tenantId: tenantAId, customerId: customer.id, scenarioType: RuleScenarioType.LARGE_CASH } });
-      expect(alert).not.toBeNull();
-      expect(alert?.severity).toBe(AlertSeverity.MEDIUM);
-      expect(alert?.status).toBe(AlertStatus.NEW);
-
-      // All 5 active default rules should have produced a RuleEvaluation row.
-      const evaluations = await ctx.adminDataSource.getRepository(RuleEvaluationEntity).find({ where: { transactionId: txn.id } });
-      expect(evaluations).toHaveLength(5);
-      expect(evaluations.filter((e) => e.result === RuleEvaluationResultStatus.FIRED)).toHaveLength(1);
-    });
-
-    it("re-evaluating the SAME transaction is idempotent: fire_count increments, no second Alert row", async () => {
-      const customer = await createCustomer(tenantAId);
-      const txn = await createTransaction(tenantAId, customer.id, { channel: TransactionChannel.CASH, amount: "7000000" });
-
-      await orchestrator.evaluateTransaction(tenantAId, txn.id);
-      await orchestrator.evaluateTransaction(tenantAId, txn.id);
-
-      const alerts = await ctx.adminDataSource
-        .getRepository(AlertEntity)
-        .find({ where: { tenantId: tenantAId, customerId: customer.id, scenarioType: RuleScenarioType.LARGE_CASH } });
-      const forThisTxn = alerts.filter((a) => a.triggeringTransactionId === txn.id);
-      expect(forThisTxn).toHaveLength(1);
-      expect(forThisTxn[0].fireCount).toBe(2);
-    });
-
-    it("disabling a rule stops it from being evaluated", async () => {
-      const customer = await createCustomer(tenantAId);
-      const rule = await findRule(tenantAId, RuleScenarioType.VELOCITY_SPIKE);
-      await ctx.adminDataSource.getRepository(RuleEntity).update({ id: rule.id }, { isActive: false });
-
-      const txn = await createTransaction(tenantAId, customer.id, { channel: TransactionChannel.CASH, amount: "1000" });
-      await orchestrator.evaluateTransaction(tenantAId, txn.id);
-
-      const evaluations = await ctx.adminDataSource.getRepository(RuleEvaluationEntity).find({ where: { transactionId: txn.id } });
-      expect(evaluations.find((e) => e.ruleId === rule.id)).toBeUndefined();
-      expect(evaluations).toHaveLength(4);
-
-      await ctx.adminDataSource.getRepository(RuleEntity).update({ id: rule.id }, { isActive: true });
-    });
-
-    it("STRUCTURING fires on 3 cash deposits of 2M each within 24h", async () => {
-      const customer = await createCustomer(tenantAId);
-      const now = Date.now();
-      await createTransaction(tenantAId, customer.id, {
-        channel: TransactionChannel.CASH,
-        amount: "2000000",
-        occurredAt: new Date(now - 6 * 3_600_000),
-      });
-      await createTransaction(tenantAId, customer.id, {
-        channel: TransactionChannel.CASH,
-        amount: "2000000",
-        occurredAt: new Date(now - 3 * 3_600_000),
-      });
-      const third = await createTransaction(tenantAId, customer.id, {
-        channel: TransactionChannel.CASH,
-        amount: "2000000",
-        occurredAt: new Date(now),
-      });
-
-      await orchestrator.evaluateTransaction(tenantAId, third.id);
-
-      const alert = await ctx.adminDataSource
-        .getRepository(AlertEntity)
-        .findOne({ where: { tenantId: tenantAId, customerId: customer.id, scenarioType: RuleScenarioType.STRUCTURING } });
-      expect(alert).not.toBeNull();
-      expect(alert?.severity).toBe(AlertSeverity.HIGH);
-    });
-
-    it("RAPID_INFLOW_OUTFLOW fires on inbound followed by a large outbound within 60 minutes", async () => {
-      const customer = await createCustomer(tenantAId);
-      const now = Date.now();
-      await createTransaction(tenantAId, customer.id, {
-        type: TransactionType.CREDIT,
-        channel: TransactionChannel.TRANSFER,
-        amount: "5000000",
-        occurredAt: new Date(now - 35 * 60_000),
-      });
-      const outbound = await createTransaction(tenantAId, customer.id, {
-        type: TransactionType.DEBIT,
-        channel: TransactionChannel.TRANSFER,
-        amount: "4500000",
-        occurredAt: new Date(now),
-      });
-
-      await orchestrator.evaluateTransaction(tenantAId, outbound.id);
-
-      const alert = await ctx.adminDataSource.getRepository(AlertEntity).findOne({
-        where: { tenantId: tenantAId, customerId: customer.id, scenarioType: RuleScenarioType.RAPID_INFLOW_OUTFLOW },
-      });
-      expect(alert).not.toBeNull();
-    });
-
-    it("HIGH_RISK_COUNTERPARTY fires CRITICAL for an internal counterparty already flagged sanctioned", async () => {
-      const customer = await createCustomer(tenantAId);
-      const flaggedCounterparty = await createCustomer(tenantAId, { isSanctioned: true });
-      const txn = await createTransaction(tenantAId, customer.id, {
-        type: TransactionType.DEBIT,
-        channel: TransactionChannel.TRANSFER,
-        amount: "2500000",
-        counterpartyCustomerId: flaggedCounterparty.id,
-      });
-
-      await orchestrator.evaluateTransaction(tenantAId, txn.id);
-
-      const alert = await ctx.adminDataSource.getRepository(AlertEntity).findOne({
-        where: { tenantId: tenantAId, customerId: customer.id, scenarioType: RuleScenarioType.HIGH_RISK_COUNTERPARTY },
-      });
-      expect(alert).not.toBeNull();
-      expect(alert?.severity).toBe(AlertSeverity.CRITICAL);
-    });
-
-    it("HIGH_RISK_COUNTERPARTY fires CRITICAL for an external counterparty, and the second evaluation is served from cache (no new screening_check row)", async () => {
-      const customer = await createCustomer(tenantAId);
-      const counterpartyName = `SANCTIONED EXTERNAL PARTY ${crypto.randomUUID()}`;
-
-      const first = await createTransaction(tenantAId, customer.id, {
-        type: TransactionType.DEBIT,
-        channel: TransactionChannel.TRANSFER,
-        amount: "2500000",
-        counterpartyBank: "058",
-        counterpartyAccount: "0099887766",
-        counterpartyName,
-      });
-      await orchestrator.evaluateTransaction(tenantAId, first.id);
-
-      const alert1 = await ctx.adminDataSource.getRepository(AlertEntity).findOne({
-        where: { tenantId: tenantAId, customerId: customer.id, scenarioType: RuleScenarioType.HIGH_RISK_COUNTERPARTY, triggeringTransactionId: first.id },
-      });
-      expect(alert1).not.toBeNull();
-      expect(alert1?.severity).toBe(AlertSeverity.CRITICAL);
-
-      const checksAfterFirst = await ctx.adminDataSource
-        .getRepository(ScreeningCheckEntity)
-        .count({ where: { tenantId: tenantAId } });
-      expect(checksAfterFirst).toBeGreaterThan(0);
-
-      // Same counterparty (bank + account), a different day so it's a fresh dedup bucket/Alert —
-      // isolates the cache-hit assertion from the dedup-increment behavior tested elsewhere.
-      const second = await createTransaction(tenantAId, customer.id, {
-        type: TransactionType.DEBIT,
-        channel: TransactionChannel.TRANSFER,
-        amount: "3000000",
-        counterpartyBank: "058",
-        counterpartyAccount: "0099887766",
-        counterpartyName,
-      });
-      await orchestrator.evaluateTransaction(tenantAId, second.id);
-
-      const checksAfterSecond = await ctx.adminDataSource
-        .getRepository(ScreeningCheckEntity)
-        .count({ where: { tenantId: tenantAId } });
-      expect(checksAfterSecond).toBe(checksAfterFirst);
-    });
-
-    it("VELOCITY_SPIKE fires when today's volume is 5x+ the rolling average for an established customer", async () => {
-      const customer = await createCustomer(tenantAId, { onboardedAt: new Date(Date.now() - 200 * 86_400_000) });
-      const now = Date.now();
-      for (let daysAgo = 10; daysAgo >= 5; daysAgo--) {
-        await createTransaction(tenantAId, customer.id, {
-          channel: TransactionChannel.MOBILE,
-          amount: "1000000",
-          occurredAt: new Date(now - daysAgo * 86_400_000),
-        });
-      }
-      const spike = await createTransaction(tenantAId, customer.id, {
-        channel: TransactionChannel.MOBILE,
-        amount: "7000000",
-        occurredAt: new Date(now),
-      });
-
-      await orchestrator.evaluateTransaction(tenantAId, spike.id);
-
-      const alert = await ctx.adminDataSource.getRepository(AlertEntity).findOne({
-        where: { tenantId: tenantAId, customerId: customer.id, scenarioType: RuleScenarioType.VELOCITY_SPIKE },
-      });
-      expect(alert).not.toBeNull();
-    });
-
-    it("tenant isolation: a rule in tenant A does not fire on tenant B's transactions", async () => {
-      const customerB = await createCustomer(tenantBId);
-      const txn = await createTransaction(tenantBId, customerB.id, { channel: TransactionChannel.CASH, amount: "6000000" });
-
-      await orchestrator.evaluateTransaction(tenantBId, txn.id);
-
-      const alertUnderWrongTenant = await ctx.adminDataSource
-        .getRepository(AlertEntity)
-        .findOne({ where: { tenantId: tenantAId, triggeringTransactionId: txn.id } });
-      expect(alertUnderWrongTenant).toBeNull();
-
-      const alertUnderCorrectTenant = await ctx.adminDataSource
-        .getRepository(AlertEntity)
-        .findOne({ where: { tenantId: tenantBId, triggeringTransactionId: txn.id } });
-      expect(alertUnderCorrectTenant).not.toBeNull();
-    });
-  });
-
-  // ---------------------------------------------------------------------
   describe("alert dedup race safety", () => {
-    async function withQr<T>(tenantId: string, fn: (qr: QueryRunner) => Promise<T>): Promise<T> {
-      const qr = appDataSource.createQueryRunner();
-      await qr.connect();
-      await qr.startTransaction();
-      try {
-        await qr.query(`SELECT set_config('app.current_tenant_id', $1, true), set_config('app.bypass_rls', 'false', true)`, [tenantId]);
-        const result = await fn(qr);
-        await qr.commitTransaction();
-        return result;
-      } catch (err) {
-        if (qr.isTransactionActive) await qr.rollbackTransaction();
-        throw err;
-      } finally {
-        await qr.release();
-      }
-    }
-
     it("two concurrent fires with the same dedup_key produce exactly one Alert with fire_count = 2", async () => {
       const customer = await createCustomer(tenantAId);
       const rule = await findRule(tenantAId, RuleScenarioType.LARGE_CASH);
@@ -558,7 +373,7 @@ describe("Rules & Alerts module (e2e)", () => {
     it("lists, assigns, and closes an alert", async () => {
       const customer = await createCustomer(tenantAId);
       const txn = await createTransaction(tenantAId, customer.id, { channel: TransactionChannel.CASH, amount: "6500000" });
-      await orchestrator.evaluateTransaction(tenantAId, txn.id);
+      await seedAlert(tenantAId, customer.id, txn.id, RuleScenarioType.LARGE_CASH);
 
       const adminToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "alerts-flow");
       const listRes = await http()
@@ -606,7 +421,7 @@ describe("Rules & Alerts module (e2e)", () => {
       const tokenA = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "iso-a");
       const customerB = await createCustomer(tenantBId);
       const txnB = await createTransaction(tenantBId, customerB.id, { channel: TransactionChannel.CASH, amount: "9000000" });
-      await orchestrator.evaluateTransaction(tenantBId, txnB.id);
+      await seedAlert(tenantBId, customerB.id, txnB.id, RuleScenarioType.LARGE_CASH);
 
       const res = await http().get("/alerts").set("Authorization", `Bearer ${tokenA}`).expect(200);
       expect(res.body.data.data.find((a: { triggeringTransactionId: string }) => a.triggeringTransactionId === txnB.id)).toBeUndefined();

@@ -9,9 +9,7 @@ import { AlertsService } from "./alerts/alerts.service";
 import { RuleFactsService } from "./facts/rule-facts.service";
 import { EvaluatorFactsGatheringService } from "./facts/evaluator-facts-gathering.service";
 import { CounterpartyScreeningService } from "./counterparty/counterparty-screening.service";
-import { RuleEvaluationOrchestratorService } from "./evaluation/rule-evaluation-orchestrator.service";
 import { RuleEvaluationQueueService } from "./queue/rule-evaluation-queue.service";
-import { RuleEvaluationConsumerService } from "./queue/rule-evaluation-consumer.service";
 import { TransactionListener } from "./listeners/transaction.listener";
 import { RuleReplayService } from "./replay/rule-replay.service";
 
@@ -37,9 +35,7 @@ import { RuleReplayService } from "./replay/rule-replay.service";
     RuleFactsService,
     EvaluatorFactsGatheringService,
     CounterpartyScreeningService,
-    RuleEvaluationOrchestratorService,
     RuleEvaluationQueueService,
-    RuleEvaluationConsumerService,
     TransactionListener,
     RuleReplayService,
   ],

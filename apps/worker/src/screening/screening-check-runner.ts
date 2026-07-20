@@ -195,21 +195,27 @@ export function buildScreeningInputFromCustomer(customer: CustomerEntity): Scree
 
 /** Duplicate of apps/api's ScreeningService.runCheckInline — see that
  * file's docblock for the full behavioral spec (dedup, internal blacklist
- * first, registry resolve + retry/fallback, persist check + matches). */
+ * first, registry resolve + retry/fallback, persist check + matches).
+ * `customerId` is nullable (unlike processAsyncScreeningJob/
+ * processRescreenJob's always-real customerId) to also serve
+ * evaluate-rules.processor.ts's HIGH_RISK_COUNTERPARTY external-counterparty
+ * path, which screens a name with no known Customer row — same null-skips-
+ * dedup behavior as ScreeningService.runCheckInline's own customerId: string
+ * | null parameter. */
 export async function runScreeningCheck(
   qr: QueryRunner,
   tenant: TenantEntity,
   checkType: ScreeningCheckType,
   input: ScreeningInput,
   trigger: ScreeningTrigger,
-  customerId: string,
+  customerId: string | null,
 ): Promise<{ check: ScreeningCheckEntity; matches: ScreeningMatchEntity[] }> {
   const inputHash = computeInputHash(input);
   const startedAt = new Date();
   const checkRepo = qr.manager.getRepository(ScreeningCheckEntity);
   const matchRepo = qr.manager.getRepository(ScreeningMatchEntity);
 
-  const cached = await findRecentCompletedCheck(qr, customerId, checkType, inputHash);
+  const cached = customerId ? await findRecentCompletedCheck(qr, customerId, checkType, inputHash) : null;
   if (cached) {
     const matches = await matchRepo.find({ where: { screeningCheckId: cached.id } });
     return { check: cached, matches };

@@ -16,6 +16,9 @@ import {
   RESCREEN_QUEUE,
   RescreenJobData,
   RescreenJobResult,
+  RULE_EVALUATION_QUEUE,
+  RuleEvaluationJobData,
+  RuleEvaluationJobResult,
   TRANSACTION_INGESTION_QUEUE,
   TransactionIngestionJobData,
   TransactionIngestionJobResult,
@@ -26,6 +29,7 @@ import { processAsyncScreeningJob } from "./screening/async-screening.processor"
 import { processRescreenJob } from "./screening/rescreen-job.processor";
 import { processTransactionIngestionJob } from "./transactions/ingestion-processor";
 import { pollSftpInboxes } from "./transactions/sftp-polling";
+import { evaluateTransaction } from "./rules/evaluate-rules.processor";
 
 dotenv.config();
 
@@ -164,7 +168,25 @@ async function bootstrap(): Promise<void> {
     { connection },
   );
 
-  for (const worker of [maintenanceWorker, ingestionWorker, asyncScreeningWorker, rescreenWorker, transactionIngestionWorker]) {
+  // Matches RuleEvaluationConsumerService's original CONCURRENCY (apps/api,
+  // before this queue's consumer moved here — see HANDOFF.md's Prompt 5
+  // deviations).
+  const RULE_EVALUATION_CONCURRENCY = 5;
+  const ruleEvaluationWorker: Worker<RuleEvaluationJobData, RuleEvaluationJobResult> = new Worker(
+    RULE_EVALUATION_QUEUE,
+    async (job): Promise<RuleEvaluationJobResult> => {
+      // Borrows this Worker's own BullMQ connection for the
+      // CounterpartyScreeningService-equivalent Redis cache rather than
+      // opening a second ioredis client — same "borrow, don't open a
+      // second connection" rationale as RuleEvaluationQueueService.getClient()
+      // (apps/api) and TransactionIngestionQueueService.acquireLock.
+      const redisClient = await ruleEvaluationWorker.client;
+      return evaluateTransaction(adminDataSource, redisClient, job.data.tenantId, job.data.transactionId);
+    },
+    { connection, concurrency: RULE_EVALUATION_CONCURRENCY },
+  );
+
+  for (const worker of [maintenanceWorker, ingestionWorker, asyncScreeningWorker, rescreenWorker, transactionIngestionWorker, ruleEvaluationWorker]) {
     worker.on("completed", (job) => {
       console.log(`[worker] job ${job.name} completed`);
     });
@@ -181,17 +203,25 @@ async function bootstrap(): Promise<void> {
     res.end(
       JSON.stringify({
         status: "ok",
-        queues: [MAINTENANCE_QUEUE, CUSTOMER_INGESTION_QUEUE, ASYNC_SCREENING_QUEUE, RESCREEN_QUEUE, TRANSACTION_INGESTION_QUEUE],
+        queues: [
+          MAINTENANCE_QUEUE,
+          CUSTOMER_INGESTION_QUEUE,
+          ASYNC_SCREENING_QUEUE,
+          RESCREEN_QUEUE,
+          TRANSACTION_INGESTION_QUEUE,
+          RULE_EVALUATION_QUEUE,
+        ],
       }),
     );
   });
   healthServer.listen(PORT);
 
   console.log(
-    `RegOps worker listening on queues "${MAINTENANCE_QUEUE}", "${CUSTOMER_INGESTION_QUEUE}", "${ASYNC_SCREENING_QUEUE}", "${RESCREEN_QUEUE}", "${TRANSACTION_INGESTION_QUEUE}", health check on :${PORT}`,
+    `RegOps worker listening on queues "${MAINTENANCE_QUEUE}", "${CUSTOMER_INGESTION_QUEUE}", "${ASYNC_SCREENING_QUEUE}", "${RESCREEN_QUEUE}", "${TRANSACTION_INGESTION_QUEUE}", "${RULE_EVALUATION_QUEUE}", health check on :${PORT}`,
   );
 
   const shutdown = async () => {
+    await ruleEvaluationWorker.close();
     await transactionIngestionWorker.close();
     await rescreenWorker.close();
     await asyncScreeningWorker.close();

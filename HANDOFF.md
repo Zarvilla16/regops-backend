@@ -1352,31 +1352,54 @@ guarantees.
 
 ### Deviations from the Backend Prompt 5 spec (and why)
 
-1. **The `evaluate-rules` BullMQ consumer runs inside `apps/api`, not `apps/worker`, contradicting
-   Section 4's file tree** (`apps/worker/src/rules/evaluate-rules.processor.ts`). Two independent
-   reasons converge on this: (a) the spec's own orchestration pseudocode (Section 5.2) uses NestJS's
-   `@Processor`/`WorkerHost`/injected-services style, which is only meaningful inside a Nest DI
-   container — `apps/worker` is, and has always been, a plain Node process with no DI (see Prompt
-   4's own deviations); (b) the `HIGH_RISK_COUNTERPARTY` evaluator needs `ScreeningService`
-   (Prompt 3's provider-strategy screening engine, with its internal-blacklist/mock-provider/
-   fallback logic) — reimplementing that in a second, framework-free copy just for `apps/worker`
-   would drift from Prompt 3's real semantics and roughly double the screening surface area to
-   maintain. Running the consumer inside `apps/api` resolves both: it's still a genuine, independent
-   `bullmq` `Worker` (hand-rolled, matching every other queue integration in this codebase —
-   `TransactionIngestionQueueService`, `AsyncScreeningQueueService` — never `@nestjs/bullmq`, which
-   this project has never depended on), still asynchronous and decoupled from the ingestion
-   request/response cycle, just not a second OS process. One consequence, discovered and confirmed
-   by a live manual walkthrough (not just the automated suite): if more than one `apps/api` instance
-   runs (e.g. two `pnpm dev` processes, or N replicas in production), **each instance's own
-   `QueueEvents` bridge independently observes the same `transaction.ingested` completion** (Redis
-   pub/sub fans out to every subscriber) and enqueues its own `rule-evaluation` job — i.e. the same
-   transaction gets evaluated N times, not once. This is not a bug in the alert layer: the
-   dedup-key UPSERT correctly collapses the resulting duplicate fires into one `Alert` row with an
-   incremented `fire_count` (verified live: two independent `apps/api` processes running
-   concurrently during this session's manual walkthrough produced exactly one `Alert`, `fire_count =
-   2`), but it does mean `RuleEvaluation` audit rows are written once per live instance, not once
-   per transaction — a real, disclosed multi-instance scaling cost of this deviation, not a
-   correctness bug.
+1. ~~The `evaluate-rules` BullMQ consumer runs inside `apps/api`, not `apps/worker`, contradicting
+   Section 4's file tree.~~ **Resolved in a follow-up session** (`integration/v1`, same session that
+   moved it): the consumer now runs in `apps/worker/src/rules/evaluate-rules.processor.ts`, matching
+   Section 4's file tree and every other worker-side job in this codebase. It originally shipped
+   inside `apps/api` for two reasons: (a) the spec's own orchestration pseudocode (Section 5.2) uses
+   NestJS's `@Processor`/`WorkerHost`/injected-services style, only meaningful inside a Nest DI
+   container, and `apps/worker` has never had one (see Prompt 4's own deviations); (b) the
+   `HIGH_RISK_COUNTERPARTY` evaluator needs `ScreeningService` (Prompt 3's provider-strategy
+   screening engine). The fix follows the precedent `apps/worker/src/screening/` already set for
+   this exact problem (`screening-check-runner.ts` duplicating `ScreeningService.runCheckInline`'s
+   provider-resolution/internal-blacklist logic as plain functions): `apps/worker/src/rules/` adds
+   `rule-facts.ts` (plain-function duplicate of `RuleFactsService`'s three queries),
+   `counterparty-screening.ts` (plain-function duplicate of `CounterpartyScreeningService`, but
+   reusing `screening-check-runner.ts`'s own `runScreeningCheck` — widened to accept a nullable
+   `customerId` for the no-known-customer external-counterparty case — rather than a second full
+   duplicate of `ScreeningService.runCheckInline`), and `evaluate-rules.processor.ts` (the
+   per-transaction, per-rule loop itself, including a plain-function duplicate of
+   `AlertsService.createOrIncrement`'s UPSERT). `packages/rules-engine` needed **zero** changes — it
+   was already framework-free, confirmed rather than assumed. The 7-day counterparty-screening Redis
+   cache now borrows the `Worker`'s own BullMQ connection (`ruleEvaluationWorker.client`) the same
+   "borrow, don't open a second ioredis client" way `RuleEvaluationQueueService.getClient()` did.
+   Since the consumer now runs in a separate OS process from the producer, `RuleEvaluationQueueService`
+   gained the same `QueueEvents` completion bridge every other cross-process queue in this codebase
+   already has (`AsyncScreeningQueueService`/`RescreenQueueService`'s pattern): the worker-side
+   processor returns a `RuleEvaluationJobResult` (new `packages/shared` type) instead of emitting
+   `alert.created`/`alert.critical_fired`/`alert.escalated` directly, and the bridge re-derives and
+   emits those events in-process once it observes the job complete — no consumer of those events
+   exists yet (Case Management doesn't exist as a backend module — see Prompt 5.5's deviations), so
+   this was unobservable either way, but the event names and payloads are unchanged. `apps/api`'s
+   `RuleEvaluationOrchestratorService` was deleted (no remaining production caller once the consumer
+   moved) along with its dedicated e2e coverage, which moved to the new
+   `apps/worker/test/rules.e2e-spec.ts` (calling the real `evaluateTransaction` entry point directly
+   — same "test follows the code" precedent as `processAsyncScreeningJob`'s own coverage in
+   `screening.e2e-spec.ts`); `apps/api/test/rules.e2e-spec.ts`'s HTTP-facing tests (rule CRUD,
+   dry-run, alert assign/close, replay) are untouched, and the two tests that only needed *a* seeded
+   `Alert` row to exercise the alerts HTTP surface now call `AlertsService.createOrIncrement` directly
+   instead of a full evaluation. **The multi-instance duplicate-enqueue characteristic described
+   below is unaffected by this fix and still applies** — it's caused by `TransactionIngestionQueueService`'s
+   own `QueueEvents` bridge fanning out `transaction.ingested` per `apps/api` replica (upstream of
+   `RuleEvaluationQueueService.enqueue`), not by where the rule-evaluation consumer itself runs.
+   Verified: `pnpm build`/`pnpm test`/`pnpm test:e2e` all green at the repo root, plus a live
+   `pnpm dev` walkthrough (not just the automated suite) re-running two of
+   `docs/testing/prompt-5-swagger-test-guide.md`'s scenarios — `LARGE_CASH` and
+   `HIGH_RISK_COUNTERPARTY` (external counterparty, the one that exercises the moved screening-cache
+   path) — both fired correctly end-to-end across the real `apps/api` → Redis → `apps/worker` →
+   Postgres → `apps/api` round trip, including the 7-day screening cache (repeat transfer to the same
+   counterparty incremented `fireCount` to 2 with zero new `screening_check` rows) and the dedup
+   evidence merge.
 2. **The replay progress table (`rule_replay`) is checked, but `RuleReplayService.replay()` is
    awaited synchronously by its only caller (the CLI), not fire-and-forget.** The spec's Section
    10.3 implies an async trigger + poll model (`GET /rules/replays/:replayId` for progress while a
@@ -1430,7 +1453,9 @@ guarantees.
   as the sole `QueueEvents` listener, or moving the bridge itself into a single-instance component)
   is a real v2 item, not something papered over here.
 - **No literal fault-injection test for "one rule throwing an error does not prevent other rules
-  from firing" (Section 11.2)** — the per-rule try/catch in `RuleEvaluationOrchestratorService`
+  from firing" (Section 11.2)** — the per-rule try/catch in `evaluateTransaction`
+  (`apps/worker/src/rules/evaluate-rules.processor.ts`, formerly `apps/api`'s
+  `RuleEvaluationOrchestratorService` before the follow-up session that moved it — see Deviations #1)
   structurally guarantees this (every rule's evaluation is independently wrapped, and a thrown error
   is caught and recorded as a `RuleEvaluation` row with `result = ERROR` rather than propagating),
   and the "disabled rule is not evaluated" / "all 5 rules produce a RuleEvaluation row" tests do
@@ -1473,10 +1498,10 @@ guarantees.
 | 1 | Migration applies cleanly, monthly partitions for `rule_evaluation` | ✅ Verified — `pnpm db:migrate` against live Postgres |
 | 2 | Default `Rule` rows seeded for every new tenant | ✅ Verified — `seed.ts` re-run against live Postgres, `SELECT * FROM rule` confirms 5 rows/tenant; also covered by `TenantsService.create()`'s call to `seedDefaultsForTenant` |
 | 3 | All 5 evaluators implemented and registered | ✅ Verified — `packages/rules-engine`, 41 unit tests covering Section 11.1's full matrix; `dispatchEvaluation()` is the registry |
-| 4 | `evaluate-rules` BullMQ processor consuming `transaction.ingested` | ✅ Verified — real, independent `bullmq` `Worker`; runs inside `apps/api` not `apps/worker` (Deviations #1); exercised **twice**: once via the automated e2e suite calling the orchestrator directly (deterministic), once via a full live manual walkthrough (webhook → real `apps/worker` ingestion → real `QueueEvents` bridge → real enqueue → real consumer → real `Alert`) |
+| 4 | `evaluate-rules` BullMQ processor consuming `transaction.ingested` | ✅ Verified — real, independent `bullmq` `Worker`; runs inside `apps/worker` per Section 4's file tree as of the follow-up session that resolved Deviations #1; exercised **twice**: once via the automated e2e suite calling `evaluateTransaction` directly (deterministic, `apps/worker/test/rules.e2e-spec.ts`), once via a full live manual walkthrough (webhook → real `apps/worker` ingestion → real `transaction.ingested` → real enqueue → real `apps/worker` rule-evaluation consumer, a genuinely separate OS process from the producer → real `Alert` → `RuleEvaluationQueueService`'s `QueueEvents` bridge observing completion back in `apps/api`) |
 | 5 | Alert UPSERT semantics verified by the concurrent race test | ✅ Verified — `alert dedup race safety` describe block: two concurrent `createOrIncrement` calls on the same dedup key produce exactly one `Alert` with `fire_count = 2`; also incidentally re-confirmed live by the multi-instance duplicate-evaluation scenario in Deviations #1 |
 | 6 | Counterparty screening cache working with 7-day TTL | ✅ Verified — both the internal-counterparty path (no external call at all) and the external-counterparty path are e2e-tested; the external test asserts `screening_check` row count is identical after a second evaluation of the same counterparty (bank+account), confirming the cache genuinely short-circuits the provider call, not just that a value is stored |
-| 7 | `alert.created`, `alert.escalated`, `alert.critical_fired` events emitted correctly | ✅ Verified by code path (`RuleEvaluationOrchestratorService.emitAlertEvents`) — no dedicated `EventEmitter2` spy test asserting the exact event names/payloads in this session |
+| 7 | `alert.created`, `alert.escalated`, `alert.critical_fired` events emitted correctly | ✅ Verified by code path — since the follow-up session that resolved Deviations #1, `apps/worker`'s `evaluateTransaction` returns a `RuleEvaluationJobResult` and `apps/api`'s `RuleEvaluationQueueService`'s `QueueEvents` bridge (`onJobCompleted`) emits the three events from it; no dedicated `EventEmitter2` spy test asserting the exact event names/payloads in this session |
 | 8 | Rule update endpoints with the loosening confirmation guardrail | ✅ Verified — e2e: disable-without-reason 400, loosening-without-header 422, loosening-with-header 200, tightening never needs the header, before/after config diff on the audit row |
 | 9 | CLI replay command working in dry-run and live modes | ✅ Verified — `RuleReplayService.replay()` exercised directly (dry-run produces a CSV report and zero DB writes; live mode creates alerts and increments `fire_count` on re-run); the CLI script itself verified by direct invocation, not an automated test (see Known Issues) |
 | 10 | Audit log entries: `rule.update`, `rule.disable`, `alert.create`, `alert.assign`, `alert.close`, `alert.escalate` | ✅ Verified — e2e assertions query `audit_log` directly for `rule.disable` and `alert.close`; `rule.update`, `alert.create`, `alert.assign`, and `alert.close` were additionally confirmed live against a real Postgres instance while hand-walking `docs/testing/prompt-5-swagger-test-guide.md` (Sections 8 and 10) — `alert.escalate` is written by the same `AuditService.record()` call site as the others, confirmed by code review rather than a direct query |

@@ -283,6 +283,9 @@ importers:
       '@regops/risk-engine':
         specifier: workspace:*
         version: link:../../packages/risk-engine
+      '@regops/rules-engine':
+        specifier: workspace:*
+        version: link:../../packages/rules-engine
       '@regops/screening-engine':
         specifier: workspace:*
         version: link:../../packages/screening-engine
