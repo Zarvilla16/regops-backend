@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "jest --config jest.config.js",
     "test:e2e": "jest --config jest-e2e.config.js",
-    "cli:rule-replay": "ts-node src/rules/replay/rule-replay.cli.ts"
+    "cli:rule-replay": "ts-node src/rules/replay/rule-replay.cli.ts",
+    "cli:rule-backfill": "ts-node src/rules/backfill/rule-backfill.cli.ts"
   },
   "dependencies": {
     "@nestjs/common": "^10.4.15",

@@ -1528,6 +1528,28 @@ guarantees.
   any evaluation runs, all 7 independently observe the already-committed spike and fire, collapsing
   into one alert via the same dedup key. Documented explicitly in the guide so a reader doesn't
   mistake it for a duplicate-alert bug.
+- ~~Tenants created before this prompt shipped have zero `Rule` rows, with no retroactive seeding~~
+  — **resolved in a follow-up session** (`integration/v1`, independent of the two `evaluate-rules`
+  fixes above): a one-off backfill CLI now exists,
+  `apps/api/src/rules/backfill/rule-backfill.cli.ts` (`pnpm cli:rule-backfill [-- --dry-run]`), same
+  no-nest-commander `NestFactory.createApplicationContext` convention `rule-replay.cli.ts` already
+  established (this codebase has never depended on nest-commander — see that CLI's own docblock).
+  It calls `RulesService.seedDefaultsForTenant` verbatim, the exact same method
+  `TenantsService.create()` calls for brand-new tenants, rather than re-deriving
+  `DEFAULT_RULE_CONFIGS` a second time. Per-tenant idempotency check is deliberately precise —
+  comparing each tenant's existing `Rule.scenario_type`s against `DEFAULT_RULE_CONFIGS`, not a
+  coarse `ruleCount === 0` — so a tenant missing only *some* of the 5 defaults (not encountered in
+  this dev database, but not ruled out either) still gets backfilled correctly instead of being
+  skipped outright; `seedDefaultsForTenant` itself is already idempotent per (tenant, scenario_type),
+  so the script's own check exists to decide what to report, not to duplicate that guarantee.
+  **Run for real against the local dev database** (not just described): dry-run and live runs both
+  confirmed against a real baseline query (265 of 292 tenants had zero rules, 27 already had all 5,
+  none partially seeded) — the live run reported `265 seeded, 27 skipped, 0 failed`, matching the
+  dry-run exactly; a follow-up query confirmed every one of the 292 tenants now has exactly 5 `Rule`
+  rows (1,460 total, zero duplicate `(tenant_id, scenario_type)` pairs), and that a previously-seeded
+  tenant's rule ids/`created_at` timestamps were untouched (confirmed by direct id comparison, not
+  just a count). Re-running the script a second time confirmed idempotency live: `0 seeded, 292
+  skipped, 0 failed`, row count unchanged.
 
 ### Definition of Done — Backend Prompt 5 — verified vs. not verified
 
@@ -1575,7 +1597,16 @@ literal-spec parity: no dedicated fault-injection test for one-rule-throws-other
 a live server the same way every prior prompt's guide was (see Known Issues for the full rundown).
 It found two more genuine, non-bug findings the automated suite's own design couldn't have surfaced
 the same way: a tenant created before this prompt shipped has zero `Rule` rows (no retroactive
-seeding backfill), and a multi-row ingestion batch touching `VELOCITY_SPIKE` produces a `fireCount`
-equal to the batch size, not `1`, because every row's own `transaction.ingested` event independently
-observes the already-committed spike. Both are explained in the guide at the exact point a reader
-would otherwise assume a bug.
+seeding backfill — **since resolved by a one-off CLI backfill, `pnpm cli:rule-backfill`, run
+successfully against the dev database; see Known Issues**), and a multi-row ingestion batch touching
+`VELOCITY_SPIKE` produces a `fireCount` equal to the batch size, not `1`, because every row's own
+`transaction.ingested` event independently observes the already-committed spike. Both are explained
+in the guide at the exact point a reader would otherwise assume a bug.
+
+**Second follow-up session** (`integration/v1`): the `evaluate-rules` BullMQ consumer relocated from
+`apps/api` to `apps/worker` (matching Section 4's file tree — see the resolved Deviations #1 above),
+the multi-instance duplicate-enqueue characteristic fixed with a deterministic BullMQ `jobId` (see
+the resolved Known Issues entry above), and the zero-`Rule`-row backfill CLI added and run against
+the dev database (see the resolved Known Issues entry above) — three independent fixes, each verified
+with its own build/test/e2e pass plus a live `pnpm dev`/direct-database check, not just the automated
+suite.
