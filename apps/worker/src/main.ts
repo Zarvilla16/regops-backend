@@ -2,7 +2,7 @@ import "reflect-metadata";
 import * as dotenv from "dotenv";
 import * as http from "http";
 import * as path from "path";
-import { Queue, Worker } from "bullmq";
+import { Queue, QueueEvents, Worker } from "bullmq";
 import { DataSource } from "typeorm";
 import { entities } from "@regops/db";
 import {
@@ -16,11 +16,16 @@ import {
   RESCREEN_QUEUE,
   RescreenJobData,
   RescreenJobResult,
+  TRANSACTION_INGESTION_QUEUE,
+  TransactionIngestionJobData,
+  TransactionIngestionJobResult,
 } from "@regops/shared";
 import { LocalFileStorage } from "@regops/file-storage";
 import { processIngestionJob } from "./customer-ingestion/ingestion-job.processor";
 import { processAsyncScreeningJob } from "./screening/async-screening.processor";
 import { processRescreenJob } from "./screening/rescreen-job.processor";
+import { processTransactionIngestionJob } from "./transactions/ingestion-processor";
+import { pollSftpInboxes } from "./transactions/sftp-polling";
 
 dotenv.config();
 
@@ -73,11 +78,37 @@ async function bootstrap(): Promise<void> {
 
   const storage = new LocalFileStorage(LOCAL_STORAGE_DIR);
 
+  // Backend Prompt 4's own queue+events pair — built before maintenanceWorker
+  // so its job handler's poll-sftp-inboxes branch can close over both.
+  const transactionIngestionQueue = new Queue<TransactionIngestionJobData, TransactionIngestionJobResult>(
+    TRANSACTION_INGESTION_QUEUE,
+    { connection },
+  );
+  const transactionIngestionQueueEvents = new QueueEvents(TRANSACTION_INGESTION_QUEUE, { connection });
+
   const maintenanceQueue = new Queue(MAINTENANCE_QUEUE, { connection });
   await maintenanceQueue.add(
     "create-audit-log-partitions",
     {},
     { repeat: { pattern: "0 3 1 * *" }, jobId: "create-audit-log-partitions" }, // monthly, 03:00 UTC on the 1st
+  );
+  await maintenanceQueue.add(
+    "create-transaction-partitions",
+    {},
+    { repeat: { pattern: "0 3 25 * *" }, jobId: "create-transaction-partitions" }, // monthly, 03:00 UTC on the 25th (spec Section 3, partitioning strategy)
+  );
+  // spec Section 5.3: every 5 min during business hours (07:00-22:00 Africa/Lagos),
+  // every 30 min otherwise — two repeatable jobs covering disjoint cron windows
+  // rather than one pattern, since cron alone can't express "else".
+  await maintenanceQueue.add(
+    "poll-sftp-inboxes",
+    {},
+    { repeat: { pattern: "*/5 7-22 * * *", tz: "Africa/Lagos" }, jobId: "poll-sftp-business-hours" },
+  );
+  await maintenanceQueue.add(
+    "poll-sftp-inboxes",
+    {},
+    { repeat: { pattern: "*/30 0-6,23 * * *", tz: "Africa/Lagos" }, jobId: "poll-sftp-off-hours" },
   );
 
   const maintenanceWorker = new Worker(
@@ -90,6 +121,12 @@ async function bootstrap(): Promise<void> {
             [i * 3],
           );
         }
+      } else if (job.name === "create-transaction-partitions") {
+        // Pre-create 2 months ahead every run — comfortably covers the
+        // ~monthly cadence even if a run is delayed or skipped once.
+        await adminDataSource.query(`SELECT create_transaction_partition((now() + interval '2 months')::date)`);
+      } else if (job.name === "poll-sftp-inboxes") {
+        await pollSftpInboxes(adminDataSource, storage, transactionIngestionQueue, transactionIngestionQueueEvents);
       }
     },
     { connection },
@@ -117,7 +154,17 @@ async function bootstrap(): Promise<void> {
     { connection },
   );
 
-  for (const worker of [maintenanceWorker, ingestionWorker, asyncScreeningWorker, rescreenWorker]) {
+  const transactionIngestionWorker = new Worker<TransactionIngestionJobData, TransactionIngestionJobResult>(
+    TRANSACTION_INGESTION_QUEUE,
+    async (job) => {
+      return processTransactionIngestionJob(adminDataSource, storage, job.data, async (percent) => {
+        await job.updateProgress(percent);
+      });
+    },
+    { connection },
+  );
+
+  for (const worker of [maintenanceWorker, ingestionWorker, asyncScreeningWorker, rescreenWorker, transactionIngestionWorker]) {
     worker.on("completed", (job) => {
       console.log(`[worker] job ${job.name} completed`);
     });
@@ -134,22 +181,25 @@ async function bootstrap(): Promise<void> {
     res.end(
       JSON.stringify({
         status: "ok",
-        queues: [MAINTENANCE_QUEUE, CUSTOMER_INGESTION_QUEUE, ASYNC_SCREENING_QUEUE, RESCREEN_QUEUE],
+        queues: [MAINTENANCE_QUEUE, CUSTOMER_INGESTION_QUEUE, ASYNC_SCREENING_QUEUE, RESCREEN_QUEUE, TRANSACTION_INGESTION_QUEUE],
       }),
     );
   });
   healthServer.listen(PORT);
 
   console.log(
-    `RegOps worker listening on queues "${MAINTENANCE_QUEUE}", "${CUSTOMER_INGESTION_QUEUE}", "${ASYNC_SCREENING_QUEUE}", "${RESCREEN_QUEUE}", health check on :${PORT}`,
+    `RegOps worker listening on queues "${MAINTENANCE_QUEUE}", "${CUSTOMER_INGESTION_QUEUE}", "${ASYNC_SCREENING_QUEUE}", "${RESCREEN_QUEUE}", "${TRANSACTION_INGESTION_QUEUE}", health check on :${PORT}`,
   );
 
   const shutdown = async () => {
+    await transactionIngestionWorker.close();
     await rescreenWorker.close();
     await asyncScreeningWorker.close();
     await ingestionWorker.close();
     await maintenanceWorker.close();
     await maintenanceQueue.close();
+    await transactionIngestionQueueEvents.close();
+    await transactionIngestionQueue.close();
     await adminDataSource.destroy();
     healthServer.close();
     process.exit(0);

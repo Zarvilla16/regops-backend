@@ -1,6 +1,9 @@
 import {
+  AccountStatus,
+  AccountType,
   CustomerStatus,
   CustomerType,
+  IngestionBatchStatus,
   MatchDecision,
   MatchReviewStatus,
   PepCategory,
@@ -15,6 +18,9 @@ import {
   ScreeningTrigger,
   TenantStatus,
   TenantType,
+  TransactionChannel,
+  TransactionSource,
+  TransactionType,
   UserRole,
   UserStatus,
 } from "./enums";
@@ -236,4 +242,69 @@ export interface ScreeningProviderConfigDto {
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+// --- Transactions (Backend Prompt 4) ----------------------------------------
+
+export interface TransactionDto {
+  id: string;
+  tenantId: string;
+  cbsTransactionId: string;
+  customerId: string;
+  accountNumber: string;
+  amount: string;
+  currency: string;
+  type: TransactionType;
+  channel: TransactionChannel;
+  counterpartyAccount: string | null;
+  counterpartyBank: string | null;
+  counterpartyName: string | null;
+  counterpartyCustomerId: string | null;
+  narration: string | null;
+  reference: string | null;
+  balanceAfter: string | null;
+  occurredAt: string;
+  ingestedAt: string;
+  source: TransactionSource;
+  ingestionBatchId: string | null;
+}
+
+export interface CustomerAccountDto {
+  id: string;
+  tenantId: string;
+  customerId: string;
+  accountNumber: string;
+  accountType: AccountType;
+  accountName: string | null;
+  status: AccountStatus;
+  balance: string | null;
+  balanceAsOf: string | null;
+  openedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface IngestionBatchDto {
+  id: string;
+  tenantId: string;
+  source: TransactionSource;
+  sourceReference: string | null;
+  status: IngestionBatchStatus;
+  totalRows: number;
+  processedRows: number;
+  succeededRows: number;
+  failedRows: number;
+  errorReportUrl: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+}
+
+/** Debug view backing GET /customers/:id/velocity-stats (spec Section 10) —
+ * the raw sub-signal inputs TransactionVelocityAdapter computed, not just
+ * the final contributed score, so a COMPLIANCE_OFFICER can see *why*. */
+export interface VelocityStatsDto {
+  customerId: string;
+  score: number;
+  detail: Record<string, unknown>;
 }

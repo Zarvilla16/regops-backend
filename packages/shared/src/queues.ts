@@ -8,3 +8,8 @@ export const MAINTENANCE_QUEUE = "maintenance";
 export const CUSTOMER_INGESTION_QUEUE = "customer-ingestion";
 export const ASYNC_SCREENING_QUEUE = "async-screening";
 export const RESCREEN_QUEUE = "rescreen";
+/** One queue for both ingestion paths (Backend Prompt 4) — the SFTP poller
+ * and the webhook controller both enqueue "ingest-transactions" jobs here;
+ * the shared IngestionService processor doesn't care which producer added
+ * the job, only the IngestionBatch row referenced by jobData.batchId. */
+export const TRANSACTION_INGESTION_QUEUE = "transaction-ingestion";

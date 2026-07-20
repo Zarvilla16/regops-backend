@@ -13,7 +13,9 @@ import * as argon2 from "argon2";
 import { DataSource } from "typeorm";
 import {
   AuditLogEntity,
+  CustomerAccountEntity,
   CustomerEntity,
+  IngestionBatchEntity,
   PepDetailsEntity,
   RefreshTokenEntity,
   RiskFactorConfigEntity,
@@ -22,6 +24,7 @@ import {
   ScreeningMatchEntity,
   ScreeningProviderConfigEntity,
   TenantEntity,
+  TransactionEntity,
   UserEntity,
 } from "@regops/db";
 import { ScreeningCheckType, ScreeningProviderName, TenantStatus, TenantType, UserRole, UserStatus } from "@regops/shared";
@@ -50,7 +53,12 @@ export interface TestContext {
  */
 export async function createTestContext(): Promise<TestContext> {
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-  const app = moduleRef.createNestApplication();
+  // rawBody: true — see main.ts's bootstrap() docblock; webhook e2e tests need
+  // req.rawBody for HMAC verification just like the real server. Single-arg
+  // form matters: createNestApplication(undefined, opts) silently drops opts
+  // (TestingModule treats a non-HttpServer first arg as *the options*,
+  // discarding the real second argument entirely).
+  const app = moduleRef.createNestApplication({ rawBody: true });
   configureApp(app);
   await app.init();
 
@@ -69,6 +77,9 @@ export async function createTestContext(): Promise<TestContext> {
       ScreeningCheckEntity,
       ScreeningMatchEntity,
       PepDetailsEntity,
+      TransactionEntity,
+      CustomerAccountEntity,
+      IngestionBatchEntity,
     ],
   });
   await adminDataSource.initialize();

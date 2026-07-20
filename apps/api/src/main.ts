@@ -2,6 +2,7 @@ import "reflect-metadata";
 import { INestApplication, ValidationPipe } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { NestFactory } from "@nestjs/core";
+import { NestExpressApplication } from "@nestjs/platform-express";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import helmet from "helmet";
 import { AppModule } from "./app.module";
@@ -16,6 +17,14 @@ export function configureApp(app: INestApplication): void {
   );
   app.use(helmet());
 
+  // Express's default json() body limit (100kb) rejects a legitimate
+  // 1000-transaction webhook batch (spec Section 6.1's own max) before it
+  // ever reaches IngestWebhookDto's validation, surfacing as an opaque 500
+  // instead of the intended 400. Raised, not removed — still bounded.
+  // useBodyParser (not a second app.use(express.json())) preserves the
+  // rawBody capture WebhookSignatureGuard depends on (see bootstrap()).
+  (app as NestExpressApplication).useBodyParser("json", { limit: "5mb" });
+
   const configService = app.get(ConfigService);
   app.enableCors({
     origin: configService.get<string[]>("corsOrigins"),
@@ -24,7 +33,11 @@ export function configureApp(app: INestApplication): void {
 }
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create(AppModule);
+  // rawBody: true also populates req.rawBody (alongside the normal parsed
+  // req.body) for every request — needed by WebhookSignatureGuard to verify
+  // an HMAC computed over the exact bytes the sender signed (Backend Prompt
+  // 4, Section 6.2); every other route's body handling is unaffected.
+  const app = await NestFactory.create(AppModule, { rawBody: true });
   configureApp(app);
 
   const configService = app.get(ConfigService);

@@ -6,6 +6,15 @@ import { DataSource } from "typeorm";
 import { AuthUserContext, UserRole } from "@regops/shared";
 
 const TENANT_OVERRIDE_HEADER = "x-tenant-override";
+const TENANT_ID_HEADER = "x-tenant-id";
+
+/**
+ * Routes an external caller can reach with no JWT at all (Backend Prompt
+ * 4's webhook ingestion) — the only paths where this middleware trusts a
+ * caller-supplied X-Tenant-Id header just enough to open a tenant-scoped
+ * QueryRunner. See the docblock on `use()` for why this is safe.
+ */
+const UNAUTHENTICATED_TENANT_HEADER_ROUTES = ["/transactions/ingest"];
 
 /**
  * Central multi-tenancy enforcement point. For every request:
@@ -65,6 +74,34 @@ export class TenantContextMiddleware implements NestMiddleware {
   async use(req: Request, res: Response, next: NextFunction): Promise<void> {
     const user = this.decodeUser(req);
 
+    // Webhook ingestion (Backend Prompt 4) carries no JWT — the caller
+    // authenticates via HMAC signature instead (WebhookSignatureGuard), which
+    // runs in the guard phase, AFTER this middleware. Opening a queryRunner
+    // here on the strength of an unverified X-Tenant-Id header grants no
+    // access by itself: `req.user` stays unset (so JwtAuthGuard/RolesGuard
+    // still reject anything requiring a real identity), and the guard that
+    // actually protects this route re-derives the same tenant's stored
+    // secret and 401s before the handler runs if the signature doesn't
+    // match — exactly the same "middleware trusts a claim, the guard phase
+    // verifies it" split already used for the JWT path above. Restricted to
+    // an explicit route allowlist so an arbitrary request elsewhere can't
+    // force a tenant-scoped DB connection open for free.
+    //
+    // req.originalUrl, not req.path: this middleware is mounted via
+    // `forRoutes('*')`, which Express treats as a wildcard MOUNT PATH — like
+    // any app.use(mountPath, fn), that makes req.path/req.url relative to the
+    // (fully-matching) mount point, i.e. always "/" here. originalUrl is the
+    // one property Express guarantees stays absolute regardless of mounting.
+    const requestPath = req.originalUrl.split("?")[0];
+    if (!user && UNAUTHENTICATED_TENANT_HEADER_ROUTES.includes(requestPath)) {
+      const claimedTenantId = req.header(TENANT_ID_HEADER);
+      if (claimedTenantId) {
+        await this.openTenantScopedConnection(req, res, claimedTenantId, false);
+      }
+      next();
+      return;
+    }
+
     if (!user) {
       next();
       return;
@@ -77,6 +114,21 @@ export class TenantContextMiddleware implements NestMiddleware {
     const effectiveTenantId = isSuperAdmin && overrideHeader ? overrideHeader : user.tenantId;
     const bypassRls = isSuperAdmin && Boolean(overrideHeader);
 
+    await this.openTenantScopedConnection(req, res, effectiveTenantId, bypassRls);
+    next();
+  }
+
+  /**
+   * Extracted so the webhook path (no JWT, no bypass) and the normal
+   * authenticated path share the exact same connection-opening/rollback-net
+   * logic rather than two copies drifting apart.
+   */
+  private async openTenantScopedConnection(
+    req: Request,
+    res: Response,
+    effectiveTenantId: string,
+    bypassRls: boolean,
+  ): Promise<void> {
     (req as any).effectiveTenantId = effectiveTenantId;
 
     const queryRunner = this.dataSource.createQueryRunner();
@@ -103,8 +155,6 @@ export class TenantContextMiddleware implements NestMiddleware {
         }
       })();
     });
-
-    next();
   }
 
   private decodeUser(req: Request): AuthUserContext | null {

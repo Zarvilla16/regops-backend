@@ -14,6 +14,9 @@ import { ScreeningCheckEntity } from "./entities/screening-check.entity";
 import { ScreeningMatchEntity } from "./entities/screening-match.entity";
 import { InternalBlacklistEntity } from "./entities/internal-blacklist.entity";
 import { PepDetailsEntity } from "./entities/pep-details.entity";
+import { TransactionEntity } from "./entities/transaction.entity";
+import { CustomerAccountEntity } from "./entities/customer-account.entity";
+import { IngestionBatchEntity } from "./entities/ingestion-batch.entity";
 
 dotenv.config();
 
@@ -31,6 +34,9 @@ export const entities = [
   ScreeningMatchEntity,
   InternalBlacklistEntity,
   PepDetailsEntity,
+  TransactionEntity,
+  CustomerAccountEntity,
+  IngestionBatchEntity,
 ];
 
 /**

@@ -1,11 +1,18 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
+import { Injectable, NotFoundException, Optional } from "@nestjs/common";
 import { EventEmitter2 } from "@nestjs/event-emitter";
 import { QueryRunner } from "typeorm";
 import { CustomerEntity, RiskScoreHistoryEntity } from "@regops/db";
-import { AuthUserContext, RiskScoreHistoryDto, ScoreTrigger } from "@regops/shared";
-import { aggregateRiskScore, createFactorRegistry, RiskFactorContext, runFactors } from "@regops/risk-engine";
+import { AuthUserContext, RiskFactorType, RiskScoreHistoryDto, ScoreTrigger } from "@regops/shared";
+import {
+  aggregateRiskScore,
+  createFactorRegistry,
+  RiskFactorContext,
+  runFactors,
+  TransactionVelocityAdapter,
+} from "@regops/risk-engine";
 import { AuditService } from "../audit/audit.service";
 import { RiskFactorConfigService } from "./config/risk-factor-config.service";
+import { VelocityAdapterService } from "../transactions/velocity-adapter.service";
 
 export interface CustomerRiskChangedEvent {
   tenantId: string;
@@ -25,7 +32,34 @@ export class RiskService {
     private readonly riskFactorConfigService: RiskFactorConfigService,
     private readonly auditService: AuditService,
     private readonly eventEmitter: EventEmitter2,
+    /** Optional — same @Optional() contract packages/risk-engine's
+     * TransactionVelocityFactor scaffold was built against (Backend Prompt
+     * 2). Absent only if TransactionsModule somehow isn't loaded; present in
+     * every real deployment since RiskModule imports TransactionsModule. */
+    @Optional() private readonly velocityAdapterService?: VelocityAdapterService,
   ) {}
+
+  /**
+   * risk-engine's TransactionVelocityAdapter.getStats(customerId) takes only
+   * a customerId — it has no way to receive this request's QueryRunner,
+   * tenantId, or the tenant's tuned TRANSACTION_VELOCITY config. Rather than
+   * widen that interface (and force every other, DB-agnostic factor
+   * implementation to care about it), build a one-shot closure adapter here
+   * that already has all three in scope, and hand THAT to createFactorRegistry
+   * for this single calculation.
+   */
+  private buildTransactionVelocityAdapter(
+    queryRunner: QueryRunner,
+    tenantId: string,
+    config: Record<string, unknown> | undefined,
+    now: Date,
+  ): TransactionVelocityAdapter | undefined {
+    if (!this.velocityAdapterService) return undefined;
+    const service = this.velocityAdapterService;
+    return {
+      getStats: (customerId: string) => service.getStats(queryRunner, tenantId, customerId, config ?? {}, now),
+    };
+  }
 
   toDto(history: RiskScoreHistoryEntity): RiskScoreHistoryDto {
     return {
@@ -69,7 +103,14 @@ export class RiskService {
     const configByType = new Map(configs.map((c) => [c.factorType, c]));
     const now = new Date();
 
-    const results = await runFactors(createFactorRegistry(), (factor) => {
+    const velocityAdapter = this.buildTransactionVelocityAdapter(
+      queryRunner,
+      customer.tenantId,
+      configByType.get(RiskFactorType.TRANSACTION_VELOCITY)?.config,
+      now,
+    );
+
+    const results = await runFactors(createFactorRegistry(velocityAdapter), (factor) => {
       const config = configByType.get(factor.type);
       if (!config) return null; // no tenant config row for this factor type (shouldn't happen once seeding has run)
 
@@ -167,6 +208,26 @@ export class RiskService {
       tenantId: customer.tenantId,
       userId: null,
       action: "risk.rescore.scheduled",
+      entityType: "customer",
+      entityId: customer.id,
+      afterState: { riskScore: history.score, riskLevel: history.level },
+      ipAddress: null,
+      userAgent: null,
+    });
+
+    return history;
+  }
+
+  /** System-initiated by TransactionListener's debounced transaction.ingested
+   * handler (Backend Prompt 4, Section 9.4) — same shape as rescoreScheduled,
+   * own audit action so it's independently visible in the trail. */
+  async rescoreEventTriggered(queryRunner: QueryRunner, customer: CustomerEntity): Promise<RiskScoreHistoryEntity> {
+    const history = await this.calculateAndPersist(queryRunner, customer, ScoreTrigger.TRANSACTION_ACTIVITY, null);
+
+    await this.auditService.record(queryRunner, {
+      tenantId: customer.tenantId,
+      userId: null,
+      action: "risk.rescore.transaction_activity",
       entityType: "customer",
       entityId: customer.id,
       afterState: { riskScore: history.score, riskLevel: history.level },

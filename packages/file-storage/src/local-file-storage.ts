@@ -39,4 +39,42 @@ export class LocalFileStorage implements FileStorage {
   async getSignedDownloadUrl(): Promise<string | null> {
     return null;
   }
+
+  /** Manual recursive walk rather than fs.promises.readdir's `recursive`
+   * option / Dirent.parentPath — both require a newer Node than this repo's
+   * "node >= 20.0.0" engines floor guarantees. */
+  private async walk(dir: string): Promise<string[]> {
+    let entries: fs.Dirent[];
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw err;
+    }
+
+    const files: string[] = [];
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        files.push(...(await this.walk(full)));
+      } else if (entry.isFile()) {
+        files.push(full);
+      }
+    }
+    return files;
+  }
+
+  async list(prefix: string): Promise<string[]> {
+    const dir = this.resolve(prefix);
+    const base = path.resolve(this.baseDir);
+    const absolutePaths = await this.walk(dir);
+    return absolutePaths.map((absolute) => path.relative(base, absolute).split(path.sep).join("/"));
+  }
+
+  async move(fromKey: string, toKey: string): Promise<void> {
+    const from = this.resolve(fromKey);
+    const to = this.resolve(toKey);
+    await fs.promises.mkdir(path.dirname(to), { recursive: true });
+    await fs.promises.rename(from, to);
+  }
 }

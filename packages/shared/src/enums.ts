@@ -52,6 +52,11 @@ export enum CustomerStatus {
    * until POST /customers/:id/approve-pep transitions it to ACTIVE. Not
    * directly settable via PATCH /customers/:id — see CustomersService.update. */
   PENDING_EDD_APPROVAL = "PENDING_EDD_APPROVAL",
+  /** Set only by the transaction ingestion pipeline's auto_create_stub mode
+   * (Backend Prompt 4, Section 5.6) — a Customer row created solely because
+   * an incoming transaction referenced an unknown cbs_customer_id, so
+   * something can reference it, but real KYC onboarding hasn't happened yet. */
+  PENDING_KYC = "PENDING_KYC",
 }
 
 export enum RiskLevel {
@@ -68,6 +73,8 @@ export enum ScoreTrigger {
   MANUAL = "MANUAL",
   SCREENING_MATCH = "SCREENING_MATCH",
   CUSTOMER_UPDATED = "CUSTOMER_UPDATED",
+  /** transaction.ingested, debounced 60s per customer (Backend Prompt 4, Section 9.4). */
+  TRANSACTION_ACTIVITY = "TRANSACTION_ACTIVITY",
 }
 
 /** Which discrete RiskFactor implementation a RiskFactorConfig row tunes. */
@@ -141,4 +148,68 @@ export enum PepCategory {
 export enum PepStatus {
   CURRENT = "CURRENT",
   FORMER = "FORMER",
+}
+
+// --- Transactions (Backend Prompt 4) ----------------------------------------
+
+export enum TransactionType {
+  CREDIT = "CREDIT",
+  DEBIT = "DEBIT",
+}
+
+export enum TransactionChannel {
+  BRANCH = "BRANCH",
+  MOBILE = "MOBILE",
+  USSD = "USSD",
+  POS = "POS",
+  AGENT = "AGENT",
+  TRANSFER = "TRANSFER",
+  CASH = "CASH",
+  CARD = "CARD",
+  ATM = "ATM",
+  API = "API",
+  OTHER = "OTHER",
+}
+
+/** Also used as IngestionBatch.source — every batch's rows share one origin. */
+export enum TransactionSource {
+  SFTP = "SFTP",
+  WEBHOOK = "WEBHOOK",
+  MANUAL = "MANUAL",
+  BACKFILL = "BACKFILL",
+}
+
+export enum AccountType {
+  SAVINGS = "SAVINGS",
+  CURRENT = "CURRENT",
+  LOAN = "LOAN",
+  FIXED_DEPOSIT = "FIXED_DEPOSIT",
+  WALLET = "WALLET",
+  OTHER = "OTHER",
+}
+
+export enum AccountStatus {
+  ACTIVE = "ACTIVE",
+  DORMANT = "DORMANT",
+  BLOCKED = "BLOCKED",
+  CLOSED = "CLOSED",
+}
+
+export enum IngestionBatchStatus {
+  QUEUED = "QUEUED",
+  PROCESSING = "PROCESSING",
+  COMPLETED = "COMPLETED",
+  COMPLETED_WITH_ERRORS = "COMPLETED_WITH_ERRORS",
+  FAILED = "FAILED",
+}
+
+/**
+ * Governs how IngestionService resolves a row's customer_cbs_id (spec
+ * Section 5.6). `buffer` (side-table + later linking) is explicitly v2 in
+ * the spec and is not implemented — tenants must be in `reject` or
+ * `auto_create_stub` mode.
+ */
+export enum UnknownCustomerMode {
+  REJECT = "REJECT",
+  AUTO_CREATE_STUB = "AUTO_CREATE_STUB",
 }

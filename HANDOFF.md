@@ -1019,3 +1019,287 @@ in every file, unrelated to anything built here. Initially just cleaned up and d
 deferred follow-up; on request, fixed properly at its root (`createUserFixture`, suite-wide) and
 proven to hold via two consecutive full `test:e2e` runs with no manual cleanup between them — no
 longer a known issue, and every future prompt's verification benefits from it, not just this one.
+
+### Backend Prompt 4 (Transactions module) adds
+
+The transaction ingestion backbone: a partitioned `transaction` table, two ingestion paths (SFTP
+batch + real-time webhook) funneling into one shared worker-side pipeline, and the real
+implementation behind `TransactionVelocityFactor`, which since Prompt 2 has been a scaffold that
+always returned `rawValue=0` because no adapter was wired in.
+
+- **`transaction`, `customer_account`, `ingestion_batch`** — new entities + migration
+  `1700000040000-Transactions.ts`. `transaction` is `PARTITION BY RANGE (occurred_at)`, monthly,
+  mirroring `audit_log`'s existing quarterly `create_audit_log_partition()` pattern
+  (`create_transaction_partition(for_date)`, idempotent, `IF NOT EXISTS` guarded); migration
+  pre-creates the current month + 5 ahead, plus a `transaction_default` DEFAULT partition for
+  out-of-range rows. Composite PK `(id, occurred_at)` — a Postgres requirement for any unique
+  constraint on a partitioned table, not a modeling choice. `customer_id`/`account_number`/
+  `counterparty_customer_id` are FK-by-convention only (no `REFERENCES`), same choice already made
+  for `screening_check.customer_id` — RLS enforces tenant isolation, not referential integrity.
+- **RLS at the partition level, not just the parent** — the migration enables/forces RLS on the
+  parent `transaction` table (whose `tenant_isolation`/`super_admin_bypass` policies then apply
+  automatically to every partition, present and future) **and, separately, on every individual
+  partition** (`ENABLE`/`FORCE ROW LEVEL SECURITY` are per-relation flags that do **not**
+  propagate from parent to partition — see bug #18 below, caught by this prompt's own RLS test).
+  `create_transaction_partition()` applies both flags to every partition it creates, including
+  future ones the monthly maintenance job adds.
+- **Partition maintenance** — a third `MAINTENANCE_QUEUE` job (`create-transaction-partitions`,
+  monthly on the 25th, per spec) alongside the pre-existing `create-audit-log-partitions`, in
+  `apps/worker/src/main.ts`. First BullMQ repeatable-job test in this codebase
+  (`apps/worker/test/partition-maintenance.e2e-spec.ts`) — calls the SQL function directly with a
+  forwarded date and asserts the partition (and its RLS flags) exist, idempotently.
+- **SFTP-emulated ingestion path** — no real SSH/SFTP server exists in this sandbox (see
+  Deviations). `POST /transactions/sftp-inbox` (`TENANT_ADMIN`, multipart upload) stands in for a
+  tenant's SFTP drop, writing to `tenants/<id>/sftp-inbox/<filename>` via the existing
+  `FileStorage` abstraction (extended with `list()`/`move()` for this). `apps/worker/src/
+  transactions/sftp-polling.ts` (`pollSftpInboxes`, run as a repeatable `poll-sftp-inboxes`
+  `MAINTENANCE_QUEUE` job every 5 min business-hours / 30 min otherwise, spec Section 5.3) lists
+  each active tenant's inbox prefix, quarantines filenames not matching
+  `transactions-YYYYMMDD-NNN.csv`, takes a Redis lock per `(tenantId, filename)` (5 min TTL, via a
+  tiny atomic Lua script — see Deviations) so concurrent worker replicas can't double-process a
+  file, creates an `IngestionBatch` row, enqueues the same `TRANSACTION_INGESTION_QUEUE` job the
+  webhook path uses, and moves the file to `sftp-processed/` or `sftp-quarantine/` based on the
+  outcome.
+- **Webhook ingestion path** — `POST /transactions/ingest` (spec Section 6). `TenantContextMiddleware`
+  extended to resolve tenant context from an `X-Tenant-Id` header (rather than a JWT) for exactly
+  this one route (see its docblock for why that's safe — the claim grants no access by itself;
+  `WebhookSignatureGuard` is the actual authentication, re-deriving the tenant's stored
+  `tenant.config.transactions.webhookSecret` and verifying `HMAC-SHA256(secret, timestamp + '.' +
+  rawBody)` via `crypto.timingSafeEqual`, rejecting timestamps >5min skewed). `rawBody: true`
+  enabled on `NestFactory.create`/the test harness so the guard sees the exact bytes the sender
+  signed alongside the normally-parsed body. Idempotency reuses the **existing**
+  `IdempotencyInterceptor`/`idempotency_key` table as-is via `@Idempotent()` — no bespoke
+  raw-body-hashing service needed, since the interceptor already hashes the parsed JSON body and
+  doesn't depend on `req.user` being set. Synchronous mode (`?sync=true`, ≤50 transactions, 10s
+  timeout) is **not a separate code path** — it enqueues exactly like async mode, then
+  `Job.waitUntilFinished(queueEvents, timeoutMs)`s on the very same job, so both modes share 100%
+  of the real processing pipeline.
+- **Shared ingestion pipeline** (`apps/worker/src/transactions/ingestion-processor.ts`,
+  `resolution.ts`, `transaction-row.schema.ts`) — one `processTransactionIngestionJob()` for both
+  paths (chunks of 500 rows, concurrency 4): zod validation (mirrors
+  `csv-row.schema.ts`'s house style, coercing both CSV-string and JSON-typed inputs), bulk
+  customer/account/counterparty resolution (Section 7.1's `= ANY`/`IN` pattern, no N+1),
+  batched `INSERT ... ON CONFLICT (tenant_id, cbs_transaction_id, occurred_at) DO NOTHING RETURNING
+  id` (client-generated row ids so which specific rows conflicted is unambiguous — see Deviations
+  for why this replaces `pg-copy-streams`), an error-report CSV uploaded via `FileStorage`, and
+  `IngestionBatch` status/counts updated incrementally. Customer resolution supports `reject`
+  (default) and `auto_create_stub` (`tenant.config.ingestion.unknownCustomerMode`) — a stub
+  Customer gets `customerType=INDIVIDUAL`, `kycTier=1`, `status=PENDING_KYC` (new `CustomerStatus`
+  value), `fullName` falling back to `"Unknown Customer <cbs_id>"`, and a real initial risk score.
+  Concurrent chunks racing to auto-create the same stub customer (or the same new
+  `CustomerAccount`) are handled by catching the Postgres unique-violation and re-selecting the
+  row the other chunk just committed, rather than failing every row that needed it.
+- **`transaction.ingested` event stream** — emitted once per successfully inserted transaction, but
+  from **apps/api**, not apps/worker (which has no `EventEmitter2` — it's a plain Node/BullMQ
+  process, same as every other worker job). `TransactionIngestionQueueService` bridges this via
+  `QueueEvents` exactly like `AsyncScreeningQueueService`/`CustomerIngestionService` already do:
+  the job's return value carries an `insertedTransactions: IngestedTransactionSummary[]` array, and
+  the bridge replays one `transaction.ingested` (plus `transaction.batch.completed`/`.failed`) per
+  entry once it sees the job complete.
+- **Real `TransactionVelocityFactor` wiring** — `packages/risk-engine`'s
+  `TransactionVelocityAdapter`/`createFactorRegistry(adapter?)` needed **no changes**; the interface
+  (`getStats(customerId)`, no tenantId/QueryRunner/config params) already anticipated this exactly.
+  `RiskService.calculateAndPersist` now builds a one-shot closure adapter per calculation (wrapping
+  the new `@Optional()`-injected `VelocityAdapterService`, which closes over the request's own
+  `queryRunner`/`tenantId`/tuned config) and passes it into `createFactorRegistry(...)`. The actual
+  scoring logic (`apps/api/src/transactions/velocity-scoring.ts`, pure, DB-free,
+  fully unit-tested) computes three sub-signals over a `GREATEST(30, dormancyDays)`-day window
+  queried once: volume spike (today's total > `spikeMultiplier`× the 29-day rolling average AND >
+  `spikeMinAmount`), channel anomaly (a channel used today that's absent from the prior 29 days),
+  and dormancy reactivation (no activity in `[now-dormancyDays, now-7]` but activity in the last 7
+  days) — each a flat point award on detection (25/10/15, since the spec gives ranges but no
+  graduated formula), summed and clamped to `maxScore`. Re-score trigger:
+  `apps/api/src/risk/listeners/transaction.listener.ts` (`RiskModule`, not `TransactionsModule` —
+  keeps the module dependency one-directional), `@OnEvent("transaction.ingested")`, debounced 60s
+  per `(tenantId, customerId)` via a tiny atomic Redis lock (same Lua-script approach as the SFTP
+  poller's file lock, borrowing `TransactionIngestionQueueService`'s own Redis connection rather
+  than opening a second one — see Deviations), then `RiskService.rescoreEventTriggered()` (new
+  `ScoreTrigger.TRANSACTION_ACTIVITY`, own audit action `risk.rescore.transaction_activity`).
+  `GET /customers/:id/velocity-stats` exposes the same calculation's raw sub-signal detail for
+  debugging.
+- **Endpoints**: `GET /transactions`, `GET /transactions/:id`, `GET /transactions/batches[/:id][/errors]`,
+  `POST`/`GET /customer-accounts`, `GET /customers/:id/transactions`, `GET
+  /customers/:id/velocity-stats`, plus the webhook/SFTP-inbox endpoints above. Standard
+  `JwtAuthGuard`/`TenantGuard`/`RolesGuard` stack on all of them except the two ingestion endpoints
+  (webhook has no JWT at all; SFTP-inbox is `TENANT_ADMIN`-gated multipart upload like
+  `CustomerIngestionController`).
+
+### Critical bugs found while building the Transactions module (all fixed)
+
+Continuing the numbering above.
+
+17. **`TenantContextMiddleware`'s new unauthenticated-route allowlist check
+    (`UNAUTHENTICATED_TENANT_HEADER_ROUTES.includes(req.path)`) never matched, silently leaving
+    every webhook request with no tenant context at all (401 `TENANT_CONTEXT_MISSING`) —
+    caught by this prompt's own e2e test, not by inspection.** Root cause: this middleware is
+    registered via `consumer.apply(TenantContextMiddleware).forRoutes('*')`, and Express treats a
+    middleware mount path (even a wildcard) as an actual **mount point** — `req.path`/`req.url`
+    inside a `.use(mountPath, fn)`-mounted middleware become relative to that mount point, which for
+    a fully-matching `'*'` collapses to `"/"` regardless of the real request path.
+    `req.originalUrl` is the one property Express guarantees stays absolute regardless of mounting;
+    switched to `req.originalUrl.split("?")[0]`. Confirmed directly by temporarily logging both
+    values inside the middleware before fixing it, not just inferred from the symptom.
+18. **`ALTER TABLE transaction ENABLE/FORCE ROW LEVEL SECURITY` on the parent did *not* propagate
+    to its partitions — a direct query against a named partition (e.g. `transaction_2026_07`)
+    completely bypassed RLS, returning rows a request with no tenant context should never see.**
+    This is exactly the gap spec Section 3.1's "verify in a test that querying without tenant
+    context returns 0 rows from a partitioned table" was written to catch, and the first version of
+    that test (in `transactions.e2e-spec.ts`) failed immediately, for real, before this was fixed —
+    Postgres policies defined on a partitioned table's parent *do* apply automatically to every
+    partition, but the `relrowsecurity`/`relforcerowsecurity` flags that turn RLS on **at all** are
+    per-relation and do not inherit. Fixed by having `create_transaction_partition()` run
+    `ALTER TABLE %I ENABLE/FORCE ROW LEVEL SECURITY` on every partition it creates (present and
+    future), plus explicit `ALTER TABLE transaction_default ENABLE/FORCE ROW LEVEL SECURITY` in the
+    migration for the one partition the function doesn't create. Verified directly against
+    `pg_class.relrowsecurity`/`relforcerowsecurity` for a specific partition, not just via the
+    passing e2e test.
+19. **`node-postgres` has no OID mapping for an array of a custom enum type
+    (`transaction_channel_enum[]`), so `ARRAY_AGG(DISTINCT channel)` came back as the raw
+    `"{MOBILE,POS}"` text literal instead of a JS array — `VelocityAdapterService` then crashed
+    (`todayChannels.some is not a function`) the first time a customer had any transaction
+    history at all.** Fixed by casting inside the query (`ARRAY_AGG(DISTINCT channel::text)`),
+    which `pg` parses as a plain `text[]` correctly. Caught by the velocity-stats e2e test, not
+    the (DB-free) unit tests for the pure scoring function, which only ever exercised
+    already-parsed arrays.
+20. **A webhook payload near the spec's own 1000-transaction cap (1001 transactions, sent to prove
+    the cap is enforced) 500'd instead of 400'ing** — Express's default JSON body-parser limit
+    (100kb) rejected the request before `IngestWebhookDto`'s `@ArrayMaxSize(1000)` validation ever
+    ran. Fixed via `app.useBodyParser("json", { limit: "5mb" })` (preserves the `rawBody` capture
+    `WebhookSignatureGuard` needs — a second, unrelated `express.json()` call would not have).
+    Raised, not removed: still a bounded limit, just one that doesn't reject spec-legal payloads.
+21. **`TestingModule.createNestApplication(undefined, { rawBody: true })` silently discarded the
+    options object** — `apps/api/test/utils/test-app.ts` initially passed `undefined` as the first
+    argument (matching a pattern that reads naturally next to `NestFactory.create(AppModule, {...})`),
+    but `TestingModule.createNestApplication`'s overload resolution treats a non-HttpServer first
+    argument as *the options themselves*, not as a placeholder — the real second argument was never
+    read, so every webhook e2e test failed with `WEBHOOK_SIGNATURE_MISSING` (`req.rawBody` was
+    always `undefined`). Fixed by calling the single-argument form,
+    `moduleRef.createNestApplication({ rawBody: true })`. Confirmed by reading
+    `@nestjs/testing`'s actual compiled implementation, not just retrying variations.
+22. **`GET /transactions/batches` 500'd with `invalid input syntax for type uuid: "batches"` —
+    found live while hand-walking `docs/testing/prompt-4-swagger-test-guide.md` against a real
+    running server, not by the automated suite (which never happened to call this exact path with
+    no id).** Root cause: `TransactionsModule`'s `controllers` array listed `TransactionsController`
+    (`GET /transactions/:id`) before `BatchesController` (`GET /transactions/batches`) — Nest/Express
+    register and match routes in array order, so a request for `/transactions/batches` was matched
+    by the earlier, more general `:id` route first, with `"batches"` bound as the `id` param, which
+    then failed as an invalid UUID at the database layer instead of ever reaching
+    `BatchesController`. Fixed by reordering the array (`BatchesController` first — specific routes
+    before wildcard-shaped ones), and closed with a new regression test in `transactions.e2e-spec.ts`
+    ("GET /transactions/batches is not swallowed by GET /transactions/:id's route"). A reminder that
+    the automated suite calling every endpoint in isolation doesn't guarantee route *registration
+    order* is correct when two controllers share a path prefix — this class of bug only surfaces
+    when the more general route is tried against a value the more specific route was meant to catch.
+
+### Deviations from the Backend Prompt 4 spec (and why)
+
+1. **No real SFTP/SSH server** — same category of gap as the Cloudflare R2 substitution (Prompt
+   1's deviation #1). `docker/atmoz-sftp` or AWS Transfer Family both need real infrastructure this
+   sandbox doesn't have. The "SFTP path" is emulated entirely through the existing `FileStorage`
+   abstraction (extended with `list()`/`move()`): an authenticated upload endpoint stands in for
+   the tenant's inbox drop, a BullMQ repeatable job polls a storage prefix instead of an SSH
+   server, and "moving to processed/quarantine" is a `FileStorage.move()` re-key instead of an
+   `mv` on a chroot jail. Per-tenant SSH key management/rotation (spec Section 5.1) accordingly
+   does not exist — there's no SSH server for a key to authenticate against.
+2. **`pg-copy-streams` replaced with batched, client-id-tracked `INSERT ... ON CONFLICT DO
+   NOTHING`** — spec Section 5.5 explicitly offers this as a sanctioned "slower but simpler"
+   alternative. Avoids a new native dependency for a target (100k rows / 30 min) that chunked
+   inserts clear comfortably — the analogous customer-ingestion benchmark already does 100k rows
+   in ~7 minutes doing per-row work, and this prompt's own equivalent benchmark
+   (`apps/worker/test/transaction-ingestion-benchmark.e2e-spec.ts`, opt-in via
+   `RUN_TRANSACTION_INGESTION_BENCHMARK=1`) confirms the same for transactions — see the DoD table.
+3. **A new distributed-lock primitive, introduced from scratch** — no `SETNX`/lock convention
+   existed anywhere in this codebase before this prompt (only BullMQ's own bundled Redis
+   connection). Needed for two things: the SFTP poller's per-`(tenantId, filename)` lock (spec
+   Section 5.4) and the re-score debounce (spec Section 9.4). Implemented as a tiny atomic Lua
+   script (`SET key val PX ttl NX`) via BullMQ's own `Queue.client`/`defineCommand`/`runCommand`
+   rather than a second, standalone `ioredis` instance — bullmq's `IRedisClient` type deliberately
+   narrows `.set()`'s options to `{PX, EX}` only (no `NX`), so the conditional-set semantics a lock
+   needs aren't expressible through that interface's typed surface at all; the script sidesteps
+   that narrowing without reaching for the underlying adapter's real (version-conflict-prone) type.
+   Duplicated between `apps/api` (`TransactionIngestionQueueService.acquireLock`) and
+   `apps/worker` (`sftp-polling.ts`'s local `acquireLock`) rather than shared — no runtime is
+   shared between the two processes, matching every other small cross-boundary helper in this
+   codebase (`parseRedisUrl`, `withTenantContext`).
+4. **Webhook secret stored at `tenant.config.transactions.webhookSecret` (plain jsonb, not a
+   dedicated encrypted column)** — no dedicated-column precedent exists for a tenant-level secret,
+   and no value already in `tenant.config` is encrypted at rest either (Postgres's own at-rest
+   encryption is what covers storage generally, same reasoning `CustomerEntity.bvn`'s comment
+   already documents). Matches the existing bar rather than inventing a new one for just this field.
+5. **`buffer` unknown-customer-resolution mode is not implemented** — the spec itself flags this
+   as an explicit v2 item (Section 5.6); only `reject` (default) and `auto_create_stub` exist.
+6. ~~No `docs/testing/prompt-4-swagger-test-guide.md`~~ — **resolved in a follow-up session**:
+   `docs/testing/prompt-4-swagger-test-guide.md` now exists, hand-walked against a live
+   `docker-compose up -d` + `pnpm dev` instance the same way Prompts 2/3/3.5's guides were (every
+   step's response body, status code, and timing recorded is a real one, not inferred from reading
+   the code) — SFTP-emulated upload + processed/quarantine, webhook HMAC signing (valid/invalid/
+   stale), `GET /transactions`/`GET /customers/:id/transactions` visibility, a real velocity-factor
+   spike driving an automatic risk-score change end to end, and tenant isolation. Unlike prior
+   guides, two of its endpoint families genuinely cannot be exercised through Swagger's UI at all
+   (not just "no typed field" — Swagger has no way to compute an HMAC signature, and
+   `POST /transactions/sftp-inbox`/`POST /users` with `X-Tenant-Override` have no declared request
+   body/parameters whatsoever), so those steps are curl, disclosed explicitly rather than silently
+   worked around. Walking it live found and fixed one real bug — see #22 above.
+
+### Known issues / incomplete items (Backend Prompt 4)
+
+- **`GET /transactions`, `GET /transactions/batches`, and `GET /customer-accounts` have no query
+  parameters declared in Swagger** — the exact same `@nestjs/swagger` CLI-plugin gap every prior
+  prompt's list endpoints already have (Prompt 2's `GET /customers`, Prompt 3's `GET
+  /screening/checks`, Prompt 3.5's `GET /customers/export`). Filtering works correctly (verified by
+  e2e tests); it just can't be driven from typed Swagger fields.
+- **`insertedTransactions` (the array `TransactionIngestionJobResult` carries so
+  `TransactionIngestionQueueService` can replay `transaction.ingested` events) is unbounded at the
+  extreme end** — fine at pilot-MFB batch sizes and the 100k-row benchmark (which doesn't assert on
+  the array itself, only row counts/timing), but a very large real-world SFTP batch would round-trip
+  a proportionally large array through Redis via `job.returnvalue`. Same spirit as the spec's own
+  "v2 TODO: `CustomerDailyStats`" scaling note for the velocity factor — a known, disclosed v1
+  limitation, not silently ignored.
+- **The re-score debounce lock (60s) and the SFTP file lock (5min) share
+  `TransactionIngestionQueueService`'s Redis connection with the ingestion queue itself** — chosen
+  deliberately (see Deviations #3) rather than opening a second connection, but worth knowing if
+  ingestion queue load and lock-check volume ever need to scale independently.
+- **No dedicated unit tests for `IngestionBatchService`, `CustomerAccountsService`,
+  `TransactionsService`'s filtering, or the controllers** — coverage is e2e-only for the HTTP
+  surface (same pre-existing pattern as Prompt 1's Known Issues note for `CustomersService`); the
+  pure, DB-free logic (`velocity-scoring.ts`, `transaction-row.schema.ts`) does have full unit
+  coverage.
+- **`buffer` unknown-customer-resolution mode does not exist** (see Deviations #5) — a tenant that
+  needs it must currently choose `reject` or `auto_create_stub`.
+
+### Definition of Done — Backend Prompt 4 — verified vs. not verified
+
+| # | Item | Status |
+|---|---|---|
+| 1 | Migration applies cleanly, 6 monthly partitions + default partition created | ✅ Verified — `pnpm db:migrate` against live Postgres; partitions confirmed via `pg_class` |
+| 2 | Partition maintenance cron creates future partitions (forwarded-clock test) | ✅ Verified — `partition-maintenance.e2e-spec.ts`, forwarded date, idempotent |
+| 3 | `Transaction`/`CustomerAccount`/`IngestionBatch` entities + RLS in place | ✅ Verified — entities compile/typecheck; RLS confirmed at both parent AND partition level (bug #18) |
+| 4 | Webhook ingestion: HMAC verification, timestamp validation, idempotency | ✅ Verified — e2e: valid/invalid signature, stale timestamp, Idempotency-Key replay |
+| 5 | SFTP polling service running in worker, configurable cadence | ✅ Verified — `pollSftpInboxes` e2e: valid file processed+moved, misnamed file quarantined, lock prevents double-processing. The cadence itself (5min business-hours tick) was **also observed firing on a live clock**, not just called directly, while hand-walking `docs/testing/prompt-4-swagger-test-guide.md` against a real `pnpm dev` instance — a file dropped via `POST /transactions/sftp-inbox` was picked up, processed, and moved to `sftp-processed/` at the next real `*/5` tick, no forced invocation. Same for the misnamed-file → quarantine path |
+| 6 | Both paths flow through the shared IngestionService | ✅ Verified — both enqueue the same `TRANSACTION_INGESTION_QUEUE` job shape, processed by the one `processTransactionIngestionJob` |
+| 7 | COPY-based persistence achieves 100k-rows-in-30-min | ✅ Verified (via the sanctioned batched-INSERT alternative — see Deviations #2) — `RUN_TRANSACTION_INGESTION_BENCHMARK=1 pnpm --filter @regops/worker test:e2e` actually run this session: **100,000 rows in 45.2s**, comfortably clear of the 30-minute budget |
+| 8 | Customer resolution: `reject` default, `auto_create_stub` verified | ✅ Verified — e2e tests for both modes, including the concurrent-stub-creation race path |
+| 9 | Counterparty resolution populates `counterparty_customer_id` | ✅ Verified — e2e tests for both the matched (internal transfer) and unmatched (external) cases |
+| 10 | `transaction.ingested` emitted exactly once per successful insertion | ✅ Verified — e2e test asserts `insertedTransactions.length` matches `succeeded`, plus the QueueEvents-bridge re-emission path exercised directly via `EventEmitter2` |
+| 11 | Re-score debounce (60s window) verified | ✅ Verified — 100 `transaction.ingested` events for one customer in the debounce window produce exactly one new `RiskScoreHistory` row |
+| 12 | `TransactionVelocityFactor` calculates full velocity score using real data; `@Optional` injection resolves | ✅ Verified — `GET /customers/:id/velocity-stats` e2e test against real inserted transaction history (spike detected, score > 0); risk-engine's own factor tests (Prompt 2) already cover the adapter-present/absent contract unchanged |
+| 13 | Customer creation tests from Prompt 2 still pass | ✅ Verified — `customers.e2e-spec.ts`, `customer-ingestion.e2e-spec.ts` (api + worker) still 100% |
+| 14 | Screening tests from Prompt 3 still pass | ✅ Verified — `screening.e2e-spec.ts` (api + worker) still 100% |
+| 15 | Audit log entries present for all four listed actions | ⬜ Partially verified — `customer.create` (auto-stub path) and `risk.rescore.transaction_activity` confirmed via e2e; `transaction.ingest.batch`/`transaction.ingest.row.error`/`ingestion.sftp.file.processed`/`ingestion.sftp.file.quarantined` action names from the spec's literal list were not implemented as their own audit_log rows — batch/row outcomes are tracked via `IngestionBatch`'s own status/counts and the error-report CSV instead, which was judged equivalent but is a literal-naming gap worth flagging |
+| 16 | Webhook secrets never logged | ✅ Verified — grepped e2e test output/application logs for the literal secret and signature values across a full run; neither appears |
+| 17 | Swagger covers all new endpoints | ✅ Verified minimally (`@ApiTags`/`@ApiBearerAuth` only, matching house style — see Known Issues re: query-param/file-upload schema gaps) |
+| 18 | All Section 11 tests pass | ✅ Verified — 27 new e2e tests (14 `apps/api` — the 14th a route-ordering regression test added after the manual guide walkthrough found bug #22 — 13 `apps/worker`: 8 ingestion-processor + 3 sftp-polling + 2 partition-maintenance) + 19 new unit tests (9 velocity-scoring, 10 transaction-row-schema) + the opt-in 100k-row benchmark, all passing |
+| 19 | CI green | ⬜ Not verified in this session — no CI run observed; `pnpm lint && pnpm typecheck && pnpm build && pnpm test && pnpm test:e2e`, all run fresh at the repo root this session: every task green (`apps/api` e2e 89/89 across 8 suites, `apps/worker` e2e 27/27 across 5 non-benchmark suites) |
+
+**Bottom line**: both ingestion paths, the partitioned transaction store (with RLS genuinely
+enforced down to the partition level — not vacuously true, an early version of that exact test
+failed for real), and the velocity factor's real implementation all work end-to-end against a real
+Postgres and Redis — confirmed twice now, once by the automated suite and once independently by
+hand through a live server (`docs/testing/prompt-4-swagger-test-guide.md`, deviation #6 no longer
+deferred), the same bar every prior prompt's guide was held to. Three of the five bugs this prompt
+surfaced (#17, #20, #21) were webhook/test-harness plumbing issues that would have silently made
+every webhook e2e test look like an auth failure; #18 was a genuine RLS gap the spec's own required
+test was specifically designed to catch, and did; #22 (a controller-registration route-ordering bug
+on `GET /transactions/batches`) was found only by the live manual walkthrough, not by the automated
+suite, and is now fixed with its own regression test. Item 15's audit-action-naming gap is the one
+remaining honest incompletion worth a reader's attention before assuming full literal-spec parity.

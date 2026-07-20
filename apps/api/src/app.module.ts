@@ -21,6 +21,7 @@ import { AuditModule } from "./audit/audit.module";
 import { RiskModule } from "./risk/risk.module";
 import { CustomersModule } from "./customers/customers.module";
 import { ScreeningModule } from "./screening/screening.module";
+import { TransactionsModule } from "./transactions/transactions.module";
 
 @Module({
   imports: [
@@ -52,6 +53,7 @@ import { ScreeningModule } from "./screening/screening.module";
     RiskModule,
     CustomersModule,
     ScreeningModule,
+    TransactionsModule,
   ],
   providers: [
     TenantContextMiddleware,

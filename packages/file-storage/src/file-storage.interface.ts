@@ -18,4 +18,19 @@ export interface FileStorage {
    * route instead (see CustomerIngestionController's error-report endpoint).
    */
   getSignedDownloadUrl(key: string): Promise<string | null>;
+  /**
+   * Lists object keys under `prefix` (non-recursive-vs-recursive is an
+   * implementation detail — callers pass a full directory-shaped prefix like
+   * "tenants/<id>/sftp-inbox/" and get back every key nested under it).
+   * Added for Backend Prompt 4's SFTP-emulated inbox polling — a real SFTP
+   * server would list a directory over SSH; here the worker lists a
+   * FileStorage prefix instead.
+   */
+  list(prefix: string): Promise<string[]>;
+  /**
+   * Renames/moves an object — used to emulate "moving a file from inbox/ to
+   * processed/ or quarantine/" (spec Section 5.4) without a real filesystem
+   * mv on an SSH chroot jail.
+   */
+  move(fromKey: string, toKey: string): Promise<void>;
 }
