@@ -4,6 +4,9 @@ import {
   AlertCloseCategory,
   AlertSeverity,
   AlertStatus,
+  CaseApprovalOutcome,
+  CasePriority,
+  CaseStatus,
   CustomerStatus,
   CustomerType,
   IngestionBatchStatus,
@@ -11,6 +14,8 @@ import {
   MatchReviewStatus,
   PepCategory,
   PepStatus,
+  ReportStatus,
+  ReportType,
   RiskFactorType,
   RiskLevel,
   RuleAction,
@@ -384,4 +389,130 @@ export interface RuleReplayDto {
   completedAt: string | null;
   errorMessage: string | null;
   createdAt: string;
+}
+
+// --- Case Management (Backend Prompt 6) -------------------------------------
+
+export interface CaseDto {
+  id: string;
+  tenantId: string;
+  caseNumber: string;
+  customerId: string;
+  status: CaseStatus;
+  priority: CasePriority;
+  assignedTo: string | null;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  submittedBy: string | null;
+  submittedAt: string | null;
+  approvedBy: string | null;
+  approvedAt: string | null;
+  escalationRationale: string | null;
+  closedAt: string | null;
+  closedBy: string | null;
+  closureReason: string | null;
+}
+
+/** Same field set as CustomerDto's subset used by withCaseSummary in the mock. */
+export interface CaseCustomerSummaryDto {
+  id: string;
+  fullName: string;
+  photoUrl: string | null;
+  riskLevel: RiskLevel;
+  riskScore: number;
+  kycTier: number;
+  lastScreenedAt: string | null;
+  lastRiskCalculatedAt: string | null;
+  isPep: boolean;
+  isSanctioned: boolean;
+}
+
+export interface CaseAlertSummaryDto {
+  id: string;
+  title: string;
+  severity: AlertSeverity;
+  status: AlertStatus;
+  scenario: RuleScenarioType;
+}
+
+export interface CaseNoteDto {
+  id: string;
+  caseId: string;
+  userId: string;
+  content: string;
+  createdAt: string;
+}
+
+export interface CaseEvidenceDto {
+  id: string;
+  caseId: string;
+  fileName: string;
+  fileType: string;
+  fileSizeBytes: number;
+  uploadedBy: string;
+  createdAt: string;
+}
+
+export interface CaseChecklistItemDto {
+  key: "ALERT_REVIEWED" | "NOTE_ADDED" | "TRANSACTIONS_REVIEWED" | "RISK_SCORE_CURRENT";
+  label: string;
+  passed: boolean;
+}
+
+export interface CaseChecklistDto {
+  items: CaseChecklistItemDto[];
+  complete: boolean;
+}
+
+/** `type` distinguishes timeline entries for the frontend without string-matching `text` — see
+ * CaseTimelineService for the exact set of types produced (opened, reassigned, note, evidence,
+ * alert_linked, transaction, submitted, approved, rejected, closed, sar_filed). */
+export interface CaseTimelineEventDto {
+  type: string;
+  at: string;
+  actor: string;
+  text: string;
+}
+
+export interface CaseReportSummaryDto {
+  id: string;
+  status: ReportStatus;
+}
+
+export interface CaseDetailDto extends CaseDto {
+  customer: CaseCustomerSummaryDto | null;
+  alerts: CaseAlertSummaryDto[];
+  notes: CaseNoteDto[];
+  evidence: CaseEvidenceDto[];
+  transactions: TransactionDto[];
+  timeline: CaseTimelineEventDto[];
+  checklist: CaseChecklistDto;
+  report: CaseReportSummaryDto | null;
+}
+
+export interface CaseListItemDto {
+  id: string;
+  caseNumber: string;
+  customer: CaseCustomerSummaryDto | null;
+  status: CaseStatus;
+  priority: CasePriority;
+  assignedTo: string | null;
+  alertCount: number;
+  createdAt: string;
+}
+
+/** Minimal seed row — Backend Prompt 7 will extend this substantially (narrative, flagged amount,
+ * submission fields, XML content). See this prompt's HANDOFF.md section for the explicit handoff note. */
+export interface ReportDto {
+  id: string;
+  tenantId: string;
+  caseId: string;
+  customerId: string;
+  reportType: ReportType;
+  status: ReportStatus;
+  generatedAt: string;
+  generatedBy: string;
+  createdAt: string;
+  updatedAt: string;
 }

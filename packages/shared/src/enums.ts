@@ -268,3 +268,36 @@ export enum RuleReplayStatus {
   COMPLETED = "COMPLETED",
   FAILED = "FAILED",
 }
+
+// --- Case Management (Backend Prompt 6) -------------------------------------
+
+export enum CaseStatus {
+  OPEN = "OPEN",
+  UNDER_INVESTIGATION = "UNDER_INVESTIGATION",
+  PENDING_APPROVAL = "PENDING_APPROVAL",
+  SAR_FILED = "SAR_FILED",
+  CLOSED = "CLOSED",
+}
+
+export enum CasePriority {
+  LOW = "LOW",
+  MEDIUM = "MEDIUM",
+  HIGH = "HIGH",
+}
+
+/** Recorded on CaseApprovalEvent.outcome — one row per approve/reject decision on a PENDING_APPROVAL case. */
+export enum CaseApprovalOutcome {
+  APPROVED = "APPROVED",
+  REJECTED = "REJECTED",
+}
+
+/** Only SAR exists in v1 — this prompt seeds a minimal Report row; Backend Prompt 7 owns the rest. */
+export enum ReportType {
+  SAR = "SAR",
+}
+
+/** Draft-equivalent status this prompt creates the Report row with — Backend Prompt 7 is expected to add
+ * further statuses (e.g. SUBMITTED, FILED) as it builds out the real Reports lifecycle. */
+export enum ReportStatus {
+  DRAFT = "DRAFT",
+}
