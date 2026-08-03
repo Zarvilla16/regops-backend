@@ -1,12 +1,13 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { QueryRunner } from "typeorm";
-import { AlertEntity, CaseAlertEntity, CaseAssignmentEventEntity, CaseEntity, CaseNoteEntity, CustomerEntity } from "@regops/db";
+import { AlertEntity, CaseAlertEntity, CaseAssignmentEventEntity, CaseEntity, CaseEvidenceEntity, CaseNoteEntity, CustomerEntity } from "@regops/db";
 import {
   AlertSeverity,
   AuthUserContext,
   CaseCustomerSummaryDto,
   CaseDetailDto,
   CaseDto,
+  CaseEvidenceDto,
   CaseListItemDto,
   CaseNoteDto,
   CasePriority,
@@ -161,6 +162,19 @@ export class CasesService {
     return notes.map((n) => ({ id: n.id, caseId: n.caseId, userId: n.userId, content: n.content, createdAt: n.createdAt.toISOString() }));
   }
 
+  async listEvidence(qr: QueryRunner, tenantId: string, caseId: string): Promise<CaseEvidenceDto[]> {
+    const rows = await qr.manager.getRepository(CaseEvidenceEntity).find({ where: { tenantId, caseId }, order: { createdAt: "ASC" } });
+    return rows.map((e) => ({
+      id: e.id,
+      caseId: e.caseId,
+      fileName: e.fileName,
+      fileType: e.fileType,
+      fileSizeBytes: e.fileSizeBytes,
+      uploadedBy: e.uploadedBy,
+      createdAt: e.createdAt.toISOString(),
+    }));
+  }
+
   async linkedAlerts(qr: QueryRunner, tenantId: string, caseId: string): Promise<AlertEntity[]> {
     const links = await qr.manager.getRepository(CaseAlertEntity).find({ where: { tenantId, caseId } });
     if (links.length === 0) return [];
@@ -225,7 +239,7 @@ export class CasesService {
       customer: customer ? this.toCustomerSummary(customer) : null,
       alerts: alerts.map((a) => ({ id: a.id, title: a.title, severity: a.severity, status: a.status, scenario: a.scenarioType })),
       notes: await this.listNotes(qr, tenantId, id),
-      evidence: [],
+      evidence: await this.listEvidence(qr, tenantId, id),
       transactions: [],
       timeline: [],
       checklist: { items: [], complete: false },

@@ -1,6 +1,21 @@
-import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from "@nestjs/common";
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Param,
+  Post,
+  Query,
+  Req,
+  Res,
+  UploadedFile,
+  UseGuards,
+  UseInterceptors,
+} from "@nestjs/common";
+import { FileInterceptor } from "@nestjs/platform-express";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
-import { Request } from "express";
+import { Request, Response } from "express";
+import { memoryStorage } from "multer";
 import { QueryRunner } from "typeorm";
 import { AuthUserContext, CasePriority, CaseStatus, UserRole } from "@regops/shared";
 import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
@@ -10,6 +25,7 @@ import { CurrentQueryRunner } from "../common/decorators/current-query-runner.de
 import { CurrentTenant } from "../common/decorators/current-tenant.decorator";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
 import { Roles } from "../common/decorators/roles.decorator";
+import { CaseEvidenceService } from "./case-evidence.service";
 import { CaseNotesService } from "./case-notes.service";
 import { CasesService } from "./cases.service";
 import { AddNoteDto } from "./dto/add-note.dto";
@@ -32,6 +48,7 @@ export class CasesController {
   constructor(
     private readonly casesService: CasesService,
     private readonly caseNotesService: CaseNotesService,
+    private readonly caseEvidenceService: CaseEvidenceService,
   ) {}
 
   @Post()
@@ -81,5 +98,40 @@ export class CasesController {
     @Req() req: Request,
   ) {
     return this.caseNotesService.addNote(qr, tenantId, id, dto.content, currentUser, requestMeta(req));
+  }
+
+  // No multer `limits.fileSize` here — see CaseEvidenceService.upload's docblock.
+  @Post(":id/evidence")
+  @Roles(...NOTES_EVIDENCE_LINK_ROLES)
+  @UseInterceptors(FileInterceptor("file", { storage: memoryStorage() }))
+  async uploadEvidence(
+    @CurrentTenant() tenantId: string,
+    @CurrentQueryRunner() qr: QueryRunner,
+    @Param("id") id: string,
+    @UploadedFile() file: Express.Multer.File,
+    @CurrentUser() currentUser: AuthUserContext,
+    @Req() req: Request,
+  ) {
+    if (!file) {
+      throw new BadRequestException({ code: "FILE_REQUIRED", message: "An evidence file ('file' field) is required." });
+    }
+    return this.caseEvidenceService.upload(qr, tenantId, id, file, currentUser, requestMeta(req));
+  }
+
+  @Get(":id/evidence/:evidenceId")
+  @Roles(...ANY_AUTHENTICATED)
+  async downloadEvidence(
+    @CurrentTenant() tenantId: string,
+    @CurrentQueryRunner() qr: QueryRunner,
+    @Param("id") id: string,
+    @Param("evidenceId") evidenceId: string,
+    @CurrentUser() currentUser: AuthUserContext,
+    @Req() req: Request,
+    @Res() res: Response,
+  ) {
+    const { stream, contentType, fileName } = await this.caseEvidenceService.getStream(qr, tenantId, id, evidenceId, currentUser, requestMeta(req));
+    res.setHeader("content-type", contentType);
+    res.setHeader("content-disposition", `attachment; filename="${fileName.replace(/"/g, "")}"`);
+    stream.pipe(res);
   }
 }

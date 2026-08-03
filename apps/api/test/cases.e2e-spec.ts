@@ -1,7 +1,7 @@
 import request from "supertest";
 import * as crypto from "crypto";
 import { DataSource, QueryRunner } from "typeorm";
-import { AlertEntity, CaseAssignmentEventEntity, CustomerEntity, RuleEntity } from "@regops/db";
+import { AlertEntity, AuditLogEntity, CaseAssignmentEventEntity, CustomerEntity, RuleEntity } from "@regops/db";
 import { AlertSeverity, CasePriority, CaseStatus, CustomerType, RuleScenarioType, UserRole } from "@regops/shared";
 import { AlertsService } from "../src/rules/alerts/alerts.service";
 import {
@@ -265,6 +265,81 @@ describe("Cases module (e2e)", () => {
       const customer = await createCustomer(tenantAId);
       const created = await http().post("/cases").set("Authorization", `Bearer ${tokenA}`).send({ customerId: customer.id }).expect(201);
       await http().post(`/cases/${created.body.data.id}/notes`).set("Authorization", `Bearer ${tokenB}`).send({ content: "x" }).expect(404);
+    });
+  });
+
+  describe("Evidence upload/download", () => {
+    it("uploads a PDF, auto-transitions OPEN -> UNDER_INVESTIGATION, and downloads it back byte-for-byte", async () => {
+      const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "evidence-roundtrip");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
+      const caseId = created.body.data.id;
+      const fileContents = Buffer.from("%PDF-1.4 test evidence content");
+
+      const uploadRes = await http()
+        .post(`/cases/${caseId}/evidence`)
+        .set("Authorization", `Bearer ${token}`)
+        .attach("file", fileContents, { filename: "statement.pdf", contentType: "application/pdf" })
+        .expect(201);
+      expect(uploadRes.body.data.fileName).toBe("statement.pdf");
+
+      const detail = await http().get(`/cases/${caseId}`).set("Authorization", `Bearer ${token}`).expect(200);
+      expect(detail.body.data.status).toBe(CaseStatus.UNDER_INVESTIGATION);
+      expect(detail.body.data.evidence).toHaveLength(1);
+
+      const downloadRes = await http()
+        .get(`/cases/${caseId}/evidence/${uploadRes.body.data.id}`)
+        .set("Authorization", `Bearer ${token}`)
+        .expect(200);
+      expect(Buffer.compare(downloadRes.body, fileContents)).toBe(0);
+
+      const auditRows = await ctx.adminDataSource
+        .getRepository(AuditLogEntity)
+        .find({ where: { tenantId: tenantAId, entityId: caseId, action: "case.evidence_uploaded" } });
+      expect(auditRows.length).toBeGreaterThanOrEqual(1);
+      const downloadAuditRows = await ctx.adminDataSource
+        .getRepository(AuditLogEntity)
+        .find({ where: { tenantId: tenantAId, entityId: caseId, action: "case.evidence_downloaded" } });
+      expect(downloadAuditRows.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it("400 INVALID_FILE_TYPE for a disallowed content type", async () => {
+      const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "evidence-bad-type");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
+
+      const res = await http()
+        .post(`/cases/${created.body.data.id}/evidence`)
+        .set("Authorization", `Bearer ${token}`)
+        .attach("file", Buffer.from("#!/bin/sh"), { filename: "script.sh", contentType: "application/x-sh" })
+        .expect(400);
+      expect(res.body.error.code).toBe("INVALID_FILE_TYPE");
+    });
+
+    it("400 FILE_TOO_LARGE for a file over 10MB", async () => {
+      const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "evidence-too-large");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
+      const oversized = Buffer.alloc(10 * 1024 * 1024 + 1, 1);
+
+      const res = await http()
+        .post(`/cases/${created.body.data.id}/evidence`)
+        .set("Authorization", `Bearer ${token}`)
+        .attach("file", oversized, { filename: "big.csv", contentType: "text/csv" })
+        .expect(400);
+      expect(res.body.error.code).toBe("FILE_TOO_LARGE");
+    });
+
+    it("403 FORBIDDEN_ROLE for VIEWER on upload", async () => {
+      const tokenCreator = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "evidence-viewer-setup");
+      const tokenViewer = await tokenFor(tenantAId, UserRole.VIEWER, "evidence-viewer");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${tokenCreator}`).send({ customerId: customer.id }).expect(201);
+      await http()
+        .post(`/cases/${created.body.data.id}/evidence`)
+        .set("Authorization", `Bearer ${tokenViewer}`)
+        .attach("file", Buffer.from("csv,data"), { filename: "x.csv", contentType: "text/csv" })
+        .expect(403);
     });
   });
 });
