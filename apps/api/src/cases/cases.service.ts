@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { QueryRunner } from "typeorm";
-import { AlertEntity, CaseAlertEntity, CaseAssignmentEventEntity, CaseEntity, CustomerEntity } from "@regops/db";
+import { AlertEntity, CaseAlertEntity, CaseAssignmentEventEntity, CaseEntity, CaseNoteEntity, CustomerEntity } from "@regops/db";
 import {
   AlertSeverity,
   AuthUserContext,
@@ -8,6 +8,7 @@ import {
   CaseDetailDto,
   CaseDto,
   CaseListItemDto,
+  CaseNoteDto,
   CasePriority,
   CaseStatus,
 } from "@regops/shared";
@@ -140,6 +141,26 @@ export class CasesService {
     return kase;
   }
 
+  /** Section 3.2: fires the first time a note is added, evidence is
+   * uploaded, or a linked alert's status changes away from NEW — but ONLY
+   * while the case is still OPEN (a case already UNDER_INVESTIGATION or
+   * later doesn't re-fire or produce a duplicate transition). Callers MUST
+   * invoke this inside their own already-open transaction — it does not
+   * open or commit one itself. Silently no-ops on a stale/cross-tenant
+   * caseId (the caller's own lookup already 404'd before reaching here in
+   * every real call site; this only guards a hypothetical race). */
+  async maybeStartInvestigation(qr: QueryRunner, tenantId: string, caseId: string): Promise<void> {
+    const repo = qr.manager.getRepository(CaseEntity);
+    const kase = await repo.findOne({ where: { id: caseId, tenantId } });
+    if (!kase || kase.status !== CaseStatus.OPEN) return;
+    await repo.update({ id: caseId }, { status: CaseStatus.UNDER_INVESTIGATION });
+  }
+
+  async listNotes(qr: QueryRunner, tenantId: string, caseId: string): Promise<CaseNoteDto[]> {
+    const notes = await qr.manager.getRepository(CaseNoteEntity).find({ where: { tenantId, caseId }, order: { createdAt: "ASC" } });
+    return notes.map((n) => ({ id: n.id, caseId: n.caseId, userId: n.userId, content: n.content, createdAt: n.createdAt.toISOString() }));
+  }
+
   async linkedAlerts(qr: QueryRunner, tenantId: string, caseId: string): Promise<AlertEntity[]> {
     const links = await qr.manager.getRepository(CaseAlertEntity).find({ where: { tenantId, caseId } });
     if (links.length === 0) return [];
@@ -203,7 +224,7 @@ export class CasesService {
       ...this.toDto(kase),
       customer: customer ? this.toCustomerSummary(customer) : null,
       alerts: alerts.map((a) => ({ id: a.id, title: a.title, severity: a.severity, status: a.status, scenario: a.scenarioType })),
-      notes: [],
+      notes: await this.listNotes(qr, tenantId, id),
       evidence: [],
       transactions: [],
       timeline: [],

@@ -207,4 +207,64 @@ describe("Cases module (e2e)", () => {
       await http().get("/cases").set("Authorization", `Bearer ${tokenViewer}`).expect(200);
     });
   });
+
+  describe("POST /cases/:id/notes", () => {
+    it("adds a note and auto-transitions an OPEN case to UNDER_INVESTIGATION", async () => {
+      const token = await tokenFor(tenantAId, UserRole.INVESTIGATOR, "note-transition");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
+      expect(created.body.data.status).toBe(CaseStatus.OPEN);
+
+      const noteRes = await http()
+        .post(`/cases/${created.body.data.id}/notes`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ content: "Reviewed the customer's transaction history." })
+        .expect(201);
+      expect(noteRes.body.data.content).toBe("Reviewed the customer's transaction history.");
+
+      const detail = await http().get(`/cases/${created.body.data.id}`).set("Authorization", `Bearer ${token}`).expect(200);
+      expect(detail.body.data.status).toBe(CaseStatus.UNDER_INVESTIGATION);
+      expect(detail.body.data.notes).toHaveLength(1);
+    });
+
+    it("adding a second note to an already-UNDER_INVESTIGATION case does not error or regress status", async () => {
+      const token = await tokenFor(tenantAId, UserRole.INVESTIGATOR, "note-idempotent");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
+      await http().post(`/cases/${created.body.data.id}/notes`).set("Authorization", `Bearer ${token}`).send({ content: "First note." }).expect(201);
+      await http().post(`/cases/${created.body.data.id}/notes`).set("Authorization", `Bearer ${token}`).send({ content: "Second note." }).expect(201);
+
+      const detail = await http().get(`/cases/${created.body.data.id}`).set("Authorization", `Bearer ${token}`).expect(200);
+      expect(detail.body.data.status).toBe(CaseStatus.UNDER_INVESTIGATION);
+      expect(detail.body.data.notes).toHaveLength(2);
+    });
+
+    it("400 CONTENT_REQUIRED for empty/whitespace-only content", async () => {
+      const token = await tokenFor(tenantAId, UserRole.INVESTIGATOR, "note-empty");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
+      const res = await http()
+        .post(`/cases/${created.body.data.id}/notes`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ content: "   " })
+        .expect(400);
+      expect(res.body.error.code).toBe("CONTENT_REQUIRED");
+    });
+
+    it("403 FORBIDDEN_ROLE for VIEWER", async () => {
+      const tokenCreator = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "note-viewer-setup");
+      const tokenViewer = await tokenFor(tenantAId, UserRole.VIEWER, "note-viewer");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${tokenCreator}`).send({ customerId: customer.id }).expect(201);
+      await http().post(`/cases/${created.body.data.id}/notes`).set("Authorization", `Bearer ${tokenViewer}`).send({ content: "x" }).expect(403);
+    });
+
+    it("404 CASE_NOT_FOUND for a case in a different tenant", async () => {
+      const tokenA = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "note-tenanta");
+      const tokenB = await tokenFor(tenantBId, UserRole.COMPLIANCE_OFFICER, "note-tenantb");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${tokenA}`).send({ customerId: customer.id }).expect(201);
+      await http().post(`/cases/${created.body.data.id}/notes`).set("Authorization", `Bearer ${tokenB}`).send({ content: "x" }).expect(404);
+    });
+  });
 });

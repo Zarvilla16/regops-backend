@@ -10,12 +10,15 @@ import { CurrentQueryRunner } from "../common/decorators/current-query-runner.de
 import { CurrentTenant } from "../common/decorators/current-tenant.decorator";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
 import { Roles } from "../common/decorators/roles.decorator";
+import { CaseNotesService } from "./case-notes.service";
 import { CasesService } from "./cases.service";
+import { AddNoteDto } from "./dto/add-note.dto";
 import { CreateCaseDto } from "./dto/create-case.dto";
 import { ListCasesDto } from "./dto/list-cases.dto";
 
 export const ANY_AUTHENTICATED = [UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.COMPLIANCE_OFFICER, UserRole.INVESTIGATOR, UserRole.VIEWER];
 export const CREATE_ROLES = [UserRole.COMPLIANCE_OFFICER, UserRole.INVESTIGATOR];
+export const NOTES_EVIDENCE_LINK_ROLES = [UserRole.COMPLIANCE_OFFICER, UserRole.INVESTIGATOR];
 
 export function requestMeta(req: Request) {
   return { ipAddress: req.ip ?? null, userAgent: req.header("user-agent") ?? null };
@@ -26,7 +29,10 @@ export function requestMeta(req: Request) {
 @UseGuards(JwtAuthGuard, TenantGuard, RolesGuard)
 @Controller("cases")
 export class CasesController {
-  constructor(private readonly casesService: CasesService) {}
+  constructor(
+    private readonly casesService: CasesService,
+    private readonly caseNotesService: CaseNotesService,
+  ) {}
 
   @Post()
   @Roles(...CREATE_ROLES)
@@ -62,5 +68,18 @@ export class CasesController {
   @Roles(...ANY_AUTHENTICATED)
   async detail(@CurrentTenant() tenantId: string, @CurrentQueryRunner() qr: QueryRunner, @Param("id") id: string) {
     return this.casesService.toDetail(qr, tenantId, id);
+  }
+
+  @Post(":id/notes")
+  @Roles(...NOTES_EVIDENCE_LINK_ROLES)
+  async addNote(
+    @CurrentTenant() tenantId: string,
+    @CurrentQueryRunner() qr: QueryRunner,
+    @Param("id") id: string,
+    @Body() dto: AddNoteDto,
+    @CurrentUser() currentUser: AuthUserContext,
+    @Req() req: Request,
+  ) {
+    return this.caseNotesService.addNote(qr, tenantId, id, dto.content, currentUser, requestMeta(req));
   }
 }

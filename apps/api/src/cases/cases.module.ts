@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { AuditModule } from "../audit/audit.module";
+import { CaseNotesService } from "./case-notes.service";
 import { CasesController } from "./cases.controller";
 import { CasesService } from "./cases.service";
 
@@ -12,7 +13,7 @@ import { CasesService } from "./cases.service";
 @Module({
   imports: [AuditModule],
   controllers: [CasesController],
-  providers: [CasesService],
-  exports: [CasesService],
+  providers: [CasesService, CaseNotesService],
+  exports: [CasesService, CaseNotesService],
 })
 export class CasesModule {}
