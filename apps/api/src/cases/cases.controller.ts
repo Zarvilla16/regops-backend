@@ -4,6 +4,7 @@ import {
   Controller,
   Get,
   Param,
+  Patch,
   Post,
   Query,
   Req,
@@ -29,13 +30,17 @@ import { CaseEvidenceService } from "./case-evidence.service";
 import { CaseNotesService } from "./case-notes.service";
 import { CasesService } from "./cases.service";
 import { AddNoteDto } from "./dto/add-note.dto";
+import { CloseCaseDto } from "./dto/close-case.dto";
 import { CreateCaseDto } from "./dto/create-case.dto";
 import { LinkAlertDto } from "./dto/link-alert.dto";
 import { ListCasesDto } from "./dto/list-cases.dto";
+import { RejectCaseDto } from "./dto/reject-case.dto";
+import { SubmitCaseDto } from "./dto/submit-case.dto";
 
 export const ANY_AUTHENTICATED = [UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.COMPLIANCE_OFFICER, UserRole.INVESTIGATOR, UserRole.VIEWER];
 export const CREATE_ROLES = [UserRole.COMPLIANCE_OFFICER, UserRole.INVESTIGATOR];
 export const NOTES_EVIDENCE_LINK_ROLES = [UserRole.COMPLIANCE_OFFICER, UserRole.INVESTIGATOR];
+export const COMPLIANCE_OFFICER_ONLY = [UserRole.COMPLIANCE_OFFICER];
 
 export function requestMeta(req: Request) {
   return { ipAddress: req.ip ?? null, userAgent: req.header("user-agent") ?? null };
@@ -153,5 +158,56 @@ export class CasesController {
     res.setHeader("content-type", contentType);
     res.setHeader("content-disposition", `attachment; filename="${fileName.replace(/"/g, "")}"`);
     stream.pipe(res);
+  }
+
+  @Patch(":id/close")
+  @Roles(...COMPLIANCE_OFFICER_ONLY)
+  async close(
+    @CurrentTenant() tenantId: string,
+    @CurrentQueryRunner() qr: QueryRunner,
+    @Param("id") id: string,
+    @Body() dto: CloseCaseDto,
+    @CurrentUser() currentUser: AuthUserContext,
+    @Req() req: Request,
+  ) {
+    return this.casesService.close(qr, tenantId, id, dto.closureReason, currentUser, requestMeta(req));
+  }
+
+  @Patch(":id/submit")
+  @Roles(...COMPLIANCE_OFFICER_ONLY)
+  async submit(
+    @CurrentTenant() tenantId: string,
+    @CurrentQueryRunner() qr: QueryRunner,
+    @Param("id") id: string,
+    @Body() dto: SubmitCaseDto,
+    @CurrentUser() currentUser: AuthUserContext,
+    @Req() req: Request,
+  ) {
+    return this.casesService.submit(qr, tenantId, id, dto.escalationRationale, currentUser, requestMeta(req));
+  }
+
+  @Patch(":id/approve")
+  @Roles(...COMPLIANCE_OFFICER_ONLY)
+  async approve(
+    @CurrentTenant() tenantId: string,
+    @CurrentQueryRunner() qr: QueryRunner,
+    @Param("id") id: string,
+    @CurrentUser() currentUser: AuthUserContext,
+    @Req() req: Request,
+  ) {
+    return this.casesService.approve(qr, tenantId, id, currentUser, requestMeta(req));
+  }
+
+  @Patch(":id/reject")
+  @Roles(...COMPLIANCE_OFFICER_ONLY)
+  async reject(
+    @CurrentTenant() tenantId: string,
+    @CurrentQueryRunner() qr: QueryRunner,
+    @Param("id") id: string,
+    @Body() dto: RejectCaseDto,
+    @CurrentUser() currentUser: AuthUserContext,
+    @Req() req: Request,
+  ) {
+    return this.casesService.reject(qr, tenantId, id, dto.reason, currentUser, requestMeta(req));
   }
 }

@@ -1,7 +1,7 @@
 import request from "supertest";
 import * as crypto from "crypto";
 import { DataSource, QueryRunner } from "typeorm";
-import { AlertEntity, AuditLogEntity, CaseAlertEntity, CaseAssignmentEventEntity, CaseEntity, CustomerEntity, RuleEntity, TransactionEntity } from "@regops/db";
+import { AlertEntity, AuditLogEntity, CaseAlertEntity, CaseAssignmentEventEntity, CaseEntity, CustomerEntity, ReportEntity, RuleEntity, TransactionEntity } from "@regops/db";
 import {
   AlertSeverity,
   AlertStatus,
@@ -148,6 +148,19 @@ describe("Cases module (e2e)", () => {
         ...overrides,
       }),
     );
+  }
+
+  async function buildEscalatableCase(tenantId: string, creatorToken: string): Promise<{ caseId: string; assignedTo: string }> {
+    const customer = await createCustomer(tenantId, { riskLevel: RiskLevel.LOW, lastRiskCalculatedAt: new Date() });
+    const alert = await createAlert(tenantId, customer.id);
+    await ctx.adminDataSource.getRepository(AlertEntity).update({ id: alert.id }, { status: AlertStatus.ASSIGNED });
+    const created = await http().post("/cases").set("Authorization", `Bearer ${creatorToken}`).send({ alertId: alert.id }).expect(201);
+    await http()
+      .post(`/cases/${created.body.data.id}/notes`)
+      .set("Authorization", `Bearer ${creatorToken}`)
+      .send({ content: "Investigated and confirmed activity." })
+      .expect(201);
+    return { caseId: created.body.data.id, assignedTo: created.body.data.assignedTo };
   }
 
   describe("POST /cases — creation", () => {
@@ -550,6 +563,146 @@ describe("Cases module (e2e)", () => {
         .send({ alertId: crypto.randomUUID() })
         .expect(404);
       expect(res.body.error.code).toBe("ALERT_NOT_FOUND");
+    });
+  });
+
+  describe("State machine: close/submit/approve/reject", () => {
+    it("closes an OPEN case with the default closure reason when none is given", async () => {
+      const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "close-default");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
+
+      const res = await http().patch(`/cases/${created.body.data.id}/close`).set("Authorization", `Bearer ${token}`).send({}).expect(200);
+      expect(res.body.data.status).toBe(CaseStatus.CLOSED);
+      expect(res.body.data.closureReason).toBe("False positive — no suspicious activity confirmed after investigation.");
+      expect(res.body.data.closedBy).toBeTruthy();
+    });
+
+    it("409 INVALID_TRANSITION closing an already-CLOSED case", async () => {
+      const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "close-twice");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
+      await http().patch(`/cases/${created.body.data.id}/close`).set("Authorization", `Bearer ${token}`).send({}).expect(200);
+
+      const res = await http().patch(`/cases/${created.body.data.id}/close`).set("Authorization", `Bearer ${token}`).send({}).expect(409);
+      expect(res.body.error.code).toBe("INVALID_TRANSITION");
+    });
+
+    it("403 FORBIDDEN_ROLE for INVESTIGATOR on close/submit/approve/reject (COMPLIANCE_OFFICER only)", async () => {
+      const investigatorToken = await tokenFor(tenantAId, UserRole.INVESTIGATOR, "role-gate-investigator");
+      const officerToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "role-gate-setup");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${officerToken}`).send({ customerId: customer.id }).expect(201);
+
+      await http().patch(`/cases/${created.body.data.id}/close`).set("Authorization", `Bearer ${investigatorToken}`).send({}).expect(403);
+      await http().patch(`/cases/${created.body.data.id}/submit`).set("Authorization", `Bearer ${investigatorToken}`).send({ escalationRationale: "x" }).expect(403);
+      await http().patch(`/cases/${created.body.data.id}/approve`).set("Authorization", `Bearer ${investigatorToken}`).send({}).expect(403);
+      await http().patch(`/cases/${created.body.data.id}/reject`).set("Authorization", `Bearer ${investigatorToken}`).send({ reason: "x" }).expect(403);
+    });
+
+    it("403 SUBMITTER_CANNOT_BE_ASSIGNEE when the case's own assignee tries to submit it", async () => {
+      const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "submit-self-assignee");
+      const { caseId } = await buildEscalatableCase(tenantAId, token); // creator == assignee == token's user
+      const res = await http()
+        .patch(`/cases/${caseId}/submit`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ escalationRationale: "Escalating for SAR filing." })
+        .expect(403);
+      expect(res.body.error.code).toBe("SUBMITTER_CANNOT_BE_ASSIGNEE");
+    });
+
+    it("400 ESCALATION_CHECKLIST_INCOMPLETE with the specific failed item keys", async () => {
+      const creatorToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "checklist-incomplete-creator");
+      const submitterToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "checklist-incomplete-submitter");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${creatorToken}`).send({ customerId: customer.id }).expect(201);
+
+      const res = await http()
+        .patch(`/cases/${created.body.data.id}/submit`)
+        .set("Authorization", `Bearer ${submitterToken}`)
+        .send({ escalationRationale: "Escalating." })
+        .expect(400);
+      expect(res.body.error.code).toBe("ESCALATION_CHECKLIST_INCOMPLETE");
+      expect(res.body.error.details.failedItems).toEqual(
+        expect.arrayContaining(["ALERT_REVIEWED", "NOTE_ADDED"]),
+      );
+    });
+
+    it("400 ESCALATION_RATIONALE_REQUIRED when the checklist passes but rationale is blank", async () => {
+      const creatorToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "rationale-required-creator");
+      const submitterToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "rationale-required-submitter");
+      const { caseId } = await buildEscalatableCase(tenantAId, creatorToken);
+
+      const res = await http()
+        .patch(`/cases/${caseId}/submit`)
+        .set("Authorization", `Bearer ${submitterToken}`)
+        .send({ escalationRationale: "   " })
+        .expect(400);
+      expect(res.body.error.code).toBe("ESCALATION_RATIONALE_REQUIRED");
+    });
+
+    it("full maker-checker flow: submit (A) -> reject (B, reason stored, back to UNDER_INVESTIGATION) -> resubmit (B) -> approve (A) -> SAR_FILED + exactly one Report row", async () => {
+      const creatorToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "maker-checker-creator");
+      const submitterToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "maker-checker-submitter");
+      const { caseId, assignedTo } = await buildEscalatableCase(tenantAId, creatorToken);
+
+      // Submit as the submitter (not the assignee).
+      const submitRes = await http()
+        .patch(`/cases/${caseId}/submit`)
+        .set("Authorization", `Bearer ${submitterToken}`)
+        .send({ escalationRationale: "Confirmed suspicious structuring pattern." })
+        .expect(200);
+      expect(submitRes.body.data.status).toBe(CaseStatus.PENDING_APPROVAL);
+
+      // Approve as the submitter themselves -> rejected (maker-checker gate).
+      const selfApprove = await http().patch(`/cases/${caseId}/approve`).set("Authorization", `Bearer ${submitterToken}`).send({}).expect(403);
+      expect(selfApprove.body.error.code).toBe("APPROVER_CANNOT_BE_SUBMITTER");
+
+      // Reject as creatorToken — the case's own creator self-assigns at creation (Section
+      // 3.1), so creatorToken's user IS `assignedTo`, and is a different Compliance
+      // Officer than submitterToken, satisfying the maker-checker gate.
+      expect(assignedTo).toBeTruthy();
+      const rejectRes = await http()
+        .patch(`/cases/${caseId}/reject`)
+        .set("Authorization", `Bearer ${creatorToken}`)
+        .send({ reason: "Needs a second linked transaction reviewed before filing." })
+        .expect(200);
+      expect(rejectRes.body.data.status).toBe(CaseStatus.UNDER_INVESTIGATION);
+      expect(rejectRes.body.data.submittedBy).toBeNull();
+      expect(rejectRes.body.data.submittedAt).toBeNull();
+      expect(rejectRes.body.data.escalationRationale).toBeNull();
+
+      // Resubmit (checklist is still complete — note/alert/risk state unchanged) and approve as the (different) creator/assignee.
+      await http()
+        .patch(`/cases/${caseId}/submit`)
+        .set("Authorization", `Bearer ${submitterToken}`)
+        .send({ escalationRationale: "Re-escalating after addressing the rejection." })
+        .expect(200);
+      const approveRes = await http().patch(`/cases/${caseId}/approve`).set("Authorization", `Bearer ${creatorToken}`).send({}).expect(200);
+      expect(approveRes.body.data.status).toBe(CaseStatus.SAR_FILED);
+      expect(approveRes.body.data.report).not.toBeNull();
+
+      const reports = await ctx.adminDataSource.getRepository(ReportEntity).find({ where: { tenantId: tenantAId, caseId } });
+      expect(reports).toHaveLength(1);
+      expect(reports[0].customerId).toBe((await ctx.adminDataSource.getRepository(CaseEntity).findOneOrFail({ where: { id: caseId } })).customerId);
+
+      // Cannot approve a second time — the case is already terminal.
+      const doubleApprove = await http().patch(`/cases/${caseId}/approve`).set("Authorization", `Bearer ${creatorToken}`).send({}).expect(409);
+      expect(doubleApprove.body.error.code).toBe("INVALID_TRANSITION");
+    });
+
+    it("400 REJECTION_REASON_REQUIRED for a blank reason", async () => {
+      const creatorToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "reject-reason-creator");
+      const submitterToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "reject-reason-submitter");
+      const { caseId } = await buildEscalatableCase(tenantAId, creatorToken);
+      await http()
+        .patch(`/cases/${caseId}/submit`)
+        .set("Authorization", `Bearer ${submitterToken}`)
+        .send({ escalationRationale: "Escalating." })
+        .expect(200);
+
+      const res = await http().patch(`/cases/${caseId}/reject`).set("Authorization", `Bearer ${creatorToken}`).send({ reason: "  " }).expect(400);
+      expect(res.body.error.code).toBe("REJECTION_REASON_REQUIRED");
     });
   });
 });

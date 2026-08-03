@@ -1,10 +1,22 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { QueryRunner } from "typeorm";
-import { AlertEntity, CaseAlertEntity, CaseAssignmentEventEntity, CaseEntity, CaseEvidenceEntity, CaseNoteEntity, CustomerEntity, TransactionEntity } from "@regops/db";
+import {
+  AlertEntity,
+  CaseAlertEntity,
+  CaseApprovalEventEntity,
+  CaseAssignmentEventEntity,
+  CaseEntity,
+  CaseEvidenceEntity,
+  CaseNoteEntity,
+  CustomerEntity,
+  ReportEntity,
+  TransactionEntity,
+} from "@regops/db";
 import {
   AlertSeverity,
   AlertStatus,
   AuthUserContext,
+  CaseApprovalOutcome,
   CaseChecklistDto,
   CaseChecklistItemDto,
   CaseCustomerSummaryDto,
@@ -15,6 +27,8 @@ import {
   CaseNoteDto,
   CasePriority,
   CaseStatus,
+  ReportStatus,
+  ReportType,
   RiskLevel,
   TransactionDto,
 } from "@regops/shared";
@@ -206,6 +220,217 @@ export class CasesService {
     }
   }
 
+  /** Exact string from the frontend mock's DEFAULT_CLOSURE_REASON
+   * (apps/web/src/lib/mock-data/routes.ts) — Section 3.2 requires reusing it verbatim. */
+  private static readonly DEFAULT_CLOSURE_REASON = "False positive — no suspicious activity confirmed after investigation.";
+
+  /** Section 3.2: OPEN/UNDER_INVESTIGATION -> CLOSED only. COMPLIANCE_OFFICER only (role gate is on the controller). */
+  async close(qr: QueryRunner, tenantId: string, caseId: string, closureReason: string | undefined, currentUser: AuthUserContext, meta: RequestMeta): Promise<CaseDetailDto> {
+    const kase = await this.findEntity(qr, tenantId, caseId);
+    if (kase.status !== CaseStatus.OPEN && kase.status !== CaseStatus.UNDER_INVESTIGATION) {
+      throw new ConflictException({ code: "INVALID_TRANSITION", message: `Cannot close a case in status ${kase.status}.` });
+    }
+    const reason = closureReason?.trim() ? closureReason.trim() : CasesService.DEFAULT_CLOSURE_REASON;
+    const beforeState = { status: kase.status };
+
+    await qr.startTransaction();
+    try {
+      await qr.manager
+        .getRepository(CaseEntity)
+        .update({ id: caseId }, { status: CaseStatus.CLOSED, closedAt: new Date(), closedBy: currentUser.sub, closureReason: reason });
+
+      await this.auditService.record(qr, {
+        tenantId,
+        userId: currentUser.sub,
+        action: "case.closed",
+        entityType: "case",
+        entityId: caseId,
+        beforeState,
+        afterState: { status: CaseStatus.CLOSED, closureReason: reason },
+        ipAddress: meta.ipAddress,
+        userAgent: meta.userAgent,
+      });
+
+      await qr.commitTransaction();
+      return this.toDetail(qr, tenantId, caseId);
+    } catch (err) {
+      if (qr.isTransactionActive) await qr.rollbackTransaction();
+      throw err;
+    }
+  }
+
+  /** Section 3.2: OPEN/UNDER_INVESTIGATION -> PENDING_APPROVAL. Enforcement
+   * order matches the mock exactly: role (controller) -> separation-of-
+   * duties -> checklist completeness -> rationale non-empty. */
+  async submit(
+    qr: QueryRunner,
+    tenantId: string,
+    caseId: string,
+    escalationRationale: string | undefined,
+    currentUser: AuthUserContext,
+    meta: RequestMeta,
+  ): Promise<CaseDetailDto> {
+    const kase = await this.findEntity(qr, tenantId, caseId);
+    if (kase.status !== CaseStatus.OPEN && kase.status !== CaseStatus.UNDER_INVESTIGATION) {
+      throw new ConflictException({ code: "INVALID_TRANSITION", message: `Cannot submit a case in status ${kase.status} for approval.` });
+    }
+    if (currentUser.sub === kase.assignedTo) {
+      throw new ForbiddenException({ code: "SUBMITTER_CANNOT_BE_ASSIGNEE", message: "The case's own assignee cannot submit it for approval." });
+    }
+
+    const checklist = await this.computeChecklist(qr, tenantId, caseId);
+    if (!checklist.complete) {
+      throw new BadRequestException({
+        code: "ESCALATION_CHECKLIST_INCOMPLETE",
+        message: "The escalation checklist is not complete.",
+        details: { failedItems: checklist.items.filter((i) => !i.passed).map((i) => i.key) },
+      });
+    }
+
+    const rationale = escalationRationale?.trim();
+    if (!rationale) {
+      throw new BadRequestException({ code: "ESCALATION_RATIONALE_REQUIRED", message: "A non-empty escalation rationale is required." });
+    }
+
+    const beforeState = { status: kase.status };
+    await qr.startTransaction();
+    try {
+      await qr.manager.getRepository(CaseEntity).update(
+        { id: caseId },
+        { status: CaseStatus.PENDING_APPROVAL, submittedBy: currentUser.sub, submittedAt: new Date(), escalationRationale: rationale },
+      );
+
+      await this.auditService.record(qr, {
+        tenantId,
+        userId: currentUser.sub,
+        action: "case.submitted_for_approval",
+        entityType: "case",
+        entityId: caseId,
+        beforeState,
+        afterState: { status: CaseStatus.PENDING_APPROVAL, escalationRationale: rationale },
+        ipAddress: meta.ipAddress,
+        userAgent: meta.userAgent,
+      });
+
+      await qr.commitTransaction();
+      return this.toDetail(qr, tenantId, caseId);
+    } catch (err) {
+      if (qr.isTransactionActive) await qr.rollbackTransaction();
+      throw err;
+    }
+  }
+
+  /** Section 3.2/2.4: PENDING_APPROVAL -> SAR_FILED, in one transaction with
+   * the case_approval_event row and the auto-created draft Report (report.case_id
+   * is the FK Backend Prompt 7 builds the rest of the Reports module against).
+   * closed_at is also set here per the schema table (Section 6): "set on
+   * CLOSED or SAR_FILED" — closed_by stays null, that's the direct-close
+   * path's field only. */
+  async approve(qr: QueryRunner, tenantId: string, caseId: string, currentUser: AuthUserContext, meta: RequestMeta): Promise<CaseDetailDto> {
+    const kase = await this.findEntity(qr, tenantId, caseId);
+    if (kase.status !== CaseStatus.PENDING_APPROVAL) {
+      throw new ConflictException({ code: "INVALID_TRANSITION", message: `Cannot approve a case in status ${kase.status}.` });
+    }
+    if (currentUser.sub === kase.submittedBy) {
+      throw new ForbiddenException({ code: "APPROVER_CANNOT_BE_SUBMITTER", message: "The submitting Compliance Officer cannot also approve this case." });
+    }
+
+    const beforeState = { status: kase.status };
+    const now = new Date();
+    await qr.startTransaction();
+    try {
+      await qr.manager
+        .getRepository(CaseEntity)
+        .update({ id: caseId }, { status: CaseStatus.SAR_FILED, approvedBy: currentUser.sub, approvedAt: now, closedAt: now });
+
+      const approvalRepo = qr.manager.getRepository(CaseApprovalEventEntity);
+      await approvalRepo.save(
+        approvalRepo.create({ tenantId, caseId, outcome: CaseApprovalOutcome.APPROVED, actor: currentUser.sub, reason: null, at: now }),
+      );
+
+      const reportRepo = qr.manager.getRepository(ReportEntity);
+      await reportRepo.save(
+        reportRepo.create({
+          tenantId,
+          caseId,
+          customerId: kase.customerId,
+          reportType: ReportType.SAR,
+          status: ReportStatus.DRAFT,
+          generatedAt: now,
+          generatedBy: currentUser.sub,
+        }),
+      );
+
+      await this.auditService.record(qr, {
+        tenantId,
+        userId: currentUser.sub,
+        action: "case.approved",
+        entityType: "case",
+        entityId: caseId,
+        beforeState,
+        afterState: { status: CaseStatus.SAR_FILED },
+        ipAddress: meta.ipAddress,
+        userAgent: meta.userAgent,
+      });
+
+      await qr.commitTransaction();
+      return this.toDetail(qr, tenantId, caseId);
+    } catch (err) {
+      if (qr.isTransactionActive) await qr.rollbackTransaction();
+      throw err;
+    }
+  }
+
+  /** Section 3.2: PENDING_APPROVAL -> UNDER_INVESTIGATION (never CLOSED — a
+   * rejection means "needs more work," per Section 2.1's explicit decision).
+   * submittedBy/submittedAt/escalationRationale are cleared so a resubmission
+   * doesn't carry stale prior-submission data. */
+  async reject(qr: QueryRunner, tenantId: string, caseId: string, reason: string | undefined, currentUser: AuthUserContext, meta: RequestMeta): Promise<CaseDetailDto> {
+    const kase = await this.findEntity(qr, tenantId, caseId);
+    if (kase.status !== CaseStatus.PENDING_APPROVAL) {
+      throw new ConflictException({ code: "INVALID_TRANSITION", message: `Cannot reject a case in status ${kase.status}.` });
+    }
+    if (currentUser.sub === kase.submittedBy) {
+      throw new ForbiddenException({ code: "APPROVER_CANNOT_BE_SUBMITTER", message: "The submitting Compliance Officer cannot also reject this case." });
+    }
+    const trimmedReason = reason?.trim();
+    if (!trimmedReason) {
+      throw new BadRequestException({ code: "REJECTION_REASON_REQUIRED", message: "A non-empty rejection reason is required." });
+    }
+
+    const beforeState = { status: kase.status };
+    const now = new Date();
+    await qr.startTransaction();
+    try {
+      await qr.manager
+        .getRepository(CaseEntity)
+        .update({ id: caseId }, { status: CaseStatus.UNDER_INVESTIGATION, submittedBy: null, submittedAt: null, escalationRationale: null });
+
+      const approvalRepo = qr.manager.getRepository(CaseApprovalEventEntity);
+      await approvalRepo.save(
+        approvalRepo.create({ tenantId, caseId, outcome: CaseApprovalOutcome.REJECTED, actor: currentUser.sub, reason: trimmedReason, at: now }),
+      );
+
+      await this.auditService.record(qr, {
+        tenantId,
+        userId: currentUser.sub,
+        action: "case.rejected",
+        entityType: "case",
+        entityId: caseId,
+        beforeState,
+        afterState: { status: CaseStatus.UNDER_INVESTIGATION, reason: trimmedReason },
+        ipAddress: meta.ipAddress,
+        userAgent: meta.userAgent,
+      });
+
+      await qr.commitTransaction();
+      return this.toDetail(qr, tenantId, caseId);
+    } catch (err) {
+      if (qr.isTransactionActive) await qr.rollbackTransaction();
+      throw err;
+    }
+  }
+
   /** Section 3.2: fires the first time a note is added, evidence is
    * uploaded, or a linked alert's status changes away from NEW — but ONLY
    * while the case is still OPEN (a case already UNDER_INVESTIGATION or
@@ -382,6 +607,7 @@ export class CasesService {
     const kase = await this.findEntity(qr, tenantId, id);
     const customer = await qr.manager.getRepository(CustomerEntity).findOne({ where: { id: kase.customerId, tenantId } });
     const alerts = await this.linkedAlerts(qr, tenantId, id);
+    const report = await qr.manager.getRepository(ReportEntity).findOne({ where: { tenantId, caseId: id } });
 
     return {
       ...this.toDto(kase),
@@ -392,7 +618,7 @@ export class CasesService {
       transactions: await this.getDerivedTransactions(qr, tenantId, id),
       timeline: [],
       checklist: await this.computeChecklist(qr, tenantId, id),
-      report: null,
+      report: report ? { id: report.id, status: report.status } : null,
     };
   }
 
