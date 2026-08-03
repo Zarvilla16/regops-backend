@@ -188,6 +188,7 @@ describe("Cases module (e2e)", () => {
       await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
 
       const res = await http().get("/cases").query({ q: "Findable" }).set("Authorization", `Bearer ${token}`).expect(200);
+      // ResponseInterceptor wraps return as { data }, and list() returns { data, meta }, so shape is { success, data: { data: [...], meta } }.
       expect(res.body.data.data.length).toBeGreaterThanOrEqual(1);
       expect(res.body.data.data.every((c: { customer: { fullName: string } | null }) => c.customer?.fullName === "Findable Person")).toBe(true);
     });

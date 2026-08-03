@@ -4,7 +4,6 @@ import {
   AlertCloseCategory,
   AlertSeverity,
   AlertStatus,
-  CaseApprovalOutcome,
   CasePriority,
   CaseStatus,
   CustomerStatus,
