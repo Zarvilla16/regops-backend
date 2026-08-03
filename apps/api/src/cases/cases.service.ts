@@ -147,6 +147,65 @@ export class CasesService {
     return kase;
   }
 
+  /** Section 2.3/3.5. The existingLink pre-check plus the migration's
+   * unique-on-alert_id index together satisfy Section 3.5's instruction to
+   * "check the constraint at the application level for a clean error, not
+   * just letting the DB constraint throw" — a genuinely concurrent double-
+   * link race (two requests linking the same alert at the same instant)
+   * would still surface as a raw constraint-violation 500 from the small
+   * window between this check and the insert; that residual race is
+   * accepted, not additionally guarded (same class of limitation as
+   * nextCaseNumber's case-number race — the spec doesn't ask for advisory
+   * locking here). */
+  async linkAlert(
+    qr: QueryRunner,
+    tenantId: string,
+    caseId: string,
+    alertId: string,
+    currentUser: AuthUserContext,
+    meta: RequestMeta,
+  ): Promise<CaseDetailDto> {
+    const kase = await this.findEntity(qr, tenantId, caseId);
+    if (kase.status === CaseStatus.CLOSED || kase.status === CaseStatus.SAR_FILED) {
+      throw new BadRequestException({ code: "CASE_ALREADY_TERMINAL", message: "Cannot link an alert to a closed or filed case." });
+    }
+
+    const alert = await qr.manager.getRepository(AlertEntity).findOne({ where: { id: alertId, tenantId } });
+    if (!alert) throw new NotFoundException({ code: "ALERT_NOT_FOUND", message: "Alert not found." });
+    if (alert.customerId !== kase.customerId) {
+      throw new BadRequestException({ code: "ALERT_CUSTOMER_MISMATCH", message: "This alert does not belong to the case's customer." });
+    }
+
+    const existingLink = await qr.manager.getRepository(CaseAlertEntity).findOne({ where: { tenantId, alertId } });
+    if (existingLink) {
+      throw new BadRequestException({ code: "ALERT_ALREADY_LINKED", message: "This alert is already linked to a case." });
+    }
+
+    await qr.startTransaction();
+    try {
+      const repo = qr.manager.getRepository(CaseAlertEntity);
+      await repo.save(repo.create({ tenantId, caseId, alertId, linkedAt: new Date(), linkedBy: currentUser.sub }));
+
+      await this.auditService.record(qr, {
+        tenantId,
+        userId: currentUser.sub,
+        action: "case.alert_linked",
+        entityType: "case",
+        entityId: caseId,
+        beforeState: null,
+        afterState: { alertId },
+        ipAddress: meta.ipAddress,
+        userAgent: meta.userAgent,
+      });
+
+      await qr.commitTransaction();
+      return this.toDetail(qr, tenantId, caseId);
+    } catch (err) {
+      if (qr.isTransactionActive) await qr.rollbackTransaction();
+      throw err;
+    }
+  }
+
   /** Section 3.2: fires the first time a note is added, evidence is
    * uploaded, or a linked alert's status changes away from NEW — but ONLY
    * while the case is still OPEN (a case already UNDER_INVESTIGATION or

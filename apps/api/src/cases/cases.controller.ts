@@ -30,6 +30,7 @@ import { CaseNotesService } from "./case-notes.service";
 import { CasesService } from "./cases.service";
 import { AddNoteDto } from "./dto/add-note.dto";
 import { CreateCaseDto } from "./dto/create-case.dto";
+import { LinkAlertDto } from "./dto/link-alert.dto";
 import { ListCasesDto } from "./dto/list-cases.dto";
 
 export const ANY_AUTHENTICATED = [UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.COMPLIANCE_OFFICER, UserRole.INVESTIGATOR, UserRole.VIEWER];
@@ -91,6 +92,19 @@ export class CasesController {
   @Roles(...ANY_AUTHENTICATED)
   async checklist(@CurrentTenant() tenantId: string, @CurrentQueryRunner() qr: QueryRunner, @Param("id") id: string) {
     return this.casesService.computeChecklist(qr, tenantId, id);
+  }
+
+  @Post(":id/alerts")
+  @Roles(...NOTES_EVIDENCE_LINK_ROLES)
+  async linkAlert(
+    @CurrentTenant() tenantId: string,
+    @CurrentQueryRunner() qr: QueryRunner,
+    @Param("id") id: string,
+    @Body() dto: LinkAlertDto,
+    @CurrentUser() currentUser: AuthUserContext,
+    @Req() req: Request,
+  ) {
+    return this.casesService.linkAlert(qr, tenantId, id, dto.alertId, currentUser, requestMeta(req));
   }
 
   @Post(":id/notes")

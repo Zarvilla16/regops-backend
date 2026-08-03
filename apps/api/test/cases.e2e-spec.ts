@@ -1,7 +1,7 @@
 import request from "supertest";
 import * as crypto from "crypto";
 import { DataSource, QueryRunner } from "typeorm";
-import { AlertEntity, AuditLogEntity, CaseAlertEntity, CaseAssignmentEventEntity, CustomerEntity, RuleEntity, TransactionEntity } from "@regops/db";
+import { AlertEntity, AuditLogEntity, CaseAlertEntity, CaseAssignmentEventEntity, CaseEntity, CustomerEntity, RuleEntity, TransactionEntity } from "@regops/db";
 import {
   AlertSeverity,
   AlertStatus,
@@ -454,6 +454,102 @@ describe("Cases module (e2e)", () => {
       const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
       const detail = await http().get(`/cases/${created.body.data.id}`).set("Authorization", `Bearer ${token}`).expect(200);
       expect(detail.body.data.checklist.items).toHaveLength(4);
+    });
+  });
+
+  describe("POST /cases/:id/alerts", () => {
+    it("links an existing alert, and does NOT change the alert's own status or auto-transition the case", async () => {
+      const token = await tokenFor(tenantAId, UserRole.INVESTIGATOR, "link-alert");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
+      const alert = await createAlert(tenantAId, customer.id);
+
+      const res = await http()
+        .post(`/cases/${created.body.data.id}/alerts`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ alertId: alert.id })
+        .expect(201);
+      expect(res.body.data.alerts).toHaveLength(1);
+      expect(res.body.data.status).toBe(CaseStatus.OPEN);
+
+      const freshAlert = await ctx.adminDataSource.getRepository(AlertEntity).findOneOrFail({ where: { id: alert.id } });
+      expect(freshAlert.status).toBe(AlertStatus.NEW);
+    });
+
+    it("linking an unreviewed alert regresses a previously-satisfiable checklist item 3", async () => {
+      const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "link-regress-checklist");
+      const customer = await createCustomer(tenantAId);
+      const txn = await createTransaction(tenantAId, customer.id);
+      const reviewedAlert = await createAlert(tenantAId, customer.id, AlertSeverity.MEDIUM, [txn.id]);
+      await ctx.adminDataSource.getRepository(AlertEntity).update({ id: reviewedAlert.id }, { status: AlertStatus.ASSIGNED });
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ alertId: reviewedAlert.id }).expect(201);
+
+      let checklist = await http().get(`/cases/${created.body.data.id}/checklist`).set("Authorization", `Bearer ${token}`).expect(200);
+      expect(checklist.body.data.items.find((i: { key: string }) => i.key === "TRANSACTIONS_REVIEWED").passed).toBe(true);
+
+      const newAlert = await createAlert(tenantAId, customer.id, AlertSeverity.MEDIUM, [txn.id]);
+      await http().post(`/cases/${created.body.data.id}/alerts`).set("Authorization", `Bearer ${token}`).send({ alertId: newAlert.id }).expect(201);
+
+      checklist = await http().get(`/cases/${created.body.data.id}/checklist`).set("Authorization", `Bearer ${token}`).expect(200);
+      expect(checklist.body.data.items.find((i: { key: string }) => i.key === "TRANSACTIONS_REVIEWED").passed).toBe(false);
+    });
+
+    it("400 ALERT_CUSTOMER_MISMATCH when the alert belongs to a different customer", async () => {
+      const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "link-mismatch");
+      const customer = await createCustomer(tenantAId);
+      const otherCustomer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
+      const alert = await createAlert(tenantAId, otherCustomer.id);
+
+      const res = await http()
+        .post(`/cases/${created.body.data.id}/alerts`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ alertId: alert.id })
+        .expect(400);
+      expect(res.body.error.code).toBe("ALERT_CUSTOMER_MISMATCH");
+    });
+
+    it("400 ALERT_ALREADY_LINKED when the alert already belongs to a case", async () => {
+      const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "link-already");
+      const customer = await createCustomer(tenantAId);
+      const alert = await createAlert(tenantAId, customer.id);
+      const firstCase = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ alertId: alert.id }).expect(201);
+      const secondCase = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
+
+      const res = await http()
+        .post(`/cases/${secondCase.body.data.id}/alerts`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ alertId: alert.id })
+        .expect(400);
+      expect(res.body.error.code).toBe("ALERT_ALREADY_LINKED");
+      void firstCase;
+    });
+
+    it("400 CASE_ALREADY_TERMINAL when the case is CLOSED", async () => {
+      const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "link-terminal");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
+      await ctx.adminDataSource.getRepository(CaseEntity).update({ id: created.body.data.id }, { status: CaseStatus.CLOSED });
+      const alert = await createAlert(tenantAId, customer.id);
+
+      const res = await http()
+        .post(`/cases/${created.body.data.id}/alerts`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ alertId: alert.id })
+        .expect(400);
+      expect(res.body.error.code).toBe("CASE_ALREADY_TERMINAL");
+    });
+
+    it("404 ALERT_NOT_FOUND for a nonexistent alertId", async () => {
+      const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "link-not-found");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
+      const res = await http()
+        .post(`/cases/${created.body.data.id}/alerts`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ alertId: crypto.randomUUID() })
+        .expect(404);
+      expect(res.body.error.code).toBe("ALERT_NOT_FOUND");
     });
   });
 });
