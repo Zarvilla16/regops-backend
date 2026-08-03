@@ -4,6 +4,7 @@ import { CaseEvidenceService } from "./case-evidence.service";
 import { CaseNotesService } from "./case-notes.service";
 import { CasesController } from "./cases.controller";
 import { CasesService } from "./cases.service";
+import { AlertStatusListener } from "./listeners/alert-status.listener";
 
 /** Deliberately imports only AuditModule — every Customer/Alert/Transaction/
  * User row this module reads is accessed directly via @regops/db entities on
@@ -14,7 +15,7 @@ import { CasesService } from "./cases.service";
 @Module({
   imports: [AuditModule],
   controllers: [CasesController],
-  providers: [CasesService, CaseNotesService, CaseEvidenceService],
+  providers: [CasesService, CaseNotesService, CaseEvidenceService, AlertStatusListener],
   exports: [CasesService, CaseNotesService, CaseEvidenceService],
 })
 export class CasesModule {}

@@ -767,4 +767,54 @@ describe("Cases module (e2e)", () => {
       expect(res.body.error.code).toBe("CASE_ALREADY_TERMINAL");
     });
   });
+
+  describe("Alert status-change auto-transition (via the existing Alerts module)", () => {
+    it("PATCH /alerts/:id/assign on a linked NEW alert transitions its OPEN case to UNDER_INVESTIGATION", async () => {
+      const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "listener-assign");
+      const customer = await createCustomer(tenantAId);
+      const alert = await createAlert(tenantAId, customer.id);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ alertId: alert.id }).expect(201);
+      expect(created.body.data.status).toBe(CaseStatus.OPEN);
+
+      const { user: assignee } = await createUserFixture(ctx.adminDataSource, tenantAId, { email: "listener-assignee@test.dev", role: UserRole.INVESTIGATOR });
+      await http().post(`/alerts/${alert.id}/assign`).set("Authorization", `Bearer ${token}`).send({ assignedTo: assignee.id }).expect(201);
+
+      // The listener runs asynchronously off the event emitter — poll briefly for the transition.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const detail = await http().get(`/cases/${created.body.data.id}`).set("Authorization", `Bearer ${token}`).expect(200);
+      expect(detail.body.data.status).toBe(CaseStatus.UNDER_INVESTIGATION);
+    });
+
+    it("PATCH /alerts/:id/close on a linked NEW alert also transitions its OPEN case to UNDER_INVESTIGATION", async () => {
+      const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "listener-close");
+      const customer = await createCustomer(tenantAId);
+      const alert = await createAlert(tenantAId, customer.id);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ alertId: alert.id }).expect(201);
+
+      await http()
+        .post(`/alerts/${alert.id}/close`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ category: "FALSE_POSITIVE", reason: "Not suspicious." })
+        .expect(201);
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const detail = await http().get(`/cases/${created.body.data.id}`).set("Authorization", `Bearer ${token}`).expect(200);
+      expect(detail.body.data.status).toBe(CaseStatus.UNDER_INVESTIGATION);
+    });
+
+    it("does not touch a case whose linked alert isn't the one that changed status", async () => {
+      const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "listener-unrelated");
+      const customer = await createCustomer(tenantAId);
+      const linkedAlert = await createAlert(tenantAId, customer.id);
+      const unrelatedAlert = await createAlert(tenantAId, customer.id);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ alertId: linkedAlert.id }).expect(201);
+
+      const { user: assignee } = await createUserFixture(ctx.adminDataSource, tenantAId, { email: "listener-unrelated-assignee@test.dev", role: UserRole.INVESTIGATOR });
+      await http().post(`/alerts/${unrelatedAlert.id}/assign`).set("Authorization", `Bearer ${token}`).send({ assignedTo: assignee.id }).expect(201);
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const detail = await http().get(`/cases/${created.body.data.id}`).set("Authorization", `Bearer ${token}`).expect(200);
+      expect(detail.body.data.status).toBe(CaseStatus.OPEN);
+    });
+  });
 });

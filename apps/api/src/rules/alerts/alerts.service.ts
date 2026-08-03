@@ -164,6 +164,7 @@ export class AlertsService {
       throw new BadRequestException({ code: "ALERT_CLOSED", message: "Cannot assign a closed alert." });
     }
     const beforeState = { status: alert.status, assignedTo: alert.assignedTo };
+    const previousStatus = alert.status;
     alert.assignedTo = assignedTo;
     if (alert.status === AlertStatus.NEW) alert.status = AlertStatus.ASSIGNED;
     const saved = await qr.manager.getRepository(AlertEntity).save(alert);
@@ -179,6 +180,18 @@ export class AlertsService {
       ipAddress: meta.ipAddress,
       userAgent: meta.userAgent,
     });
+
+    // Backend Prompt 6: Case Management's auto-transition-to-UNDER_INVESTIGATION
+    // trigger listens for this — only emit when the status genuinely changed.
+    if (saved.status !== previousStatus) {
+      this.eventEmitter.emit(ALERT_EVENTS.STATUS_CHANGED, {
+        tenantId,
+        alertId: saved.id,
+        customerId: saved.customerId,
+        previousStatus,
+        newStatus: saved.status,
+      });
+    }
 
     return this.toDto(saved);
   }
@@ -197,6 +210,7 @@ export class AlertsService {
       throw new BadRequestException({ code: "ALERT_ALREADY_CLOSED", message: "Alert is already closed." });
     }
     const beforeState = { status: alert.status };
+    const previousStatus = alert.status;
     alert.status = AlertStatus.CLOSED;
     alert.closedAt = new Date();
     alert.closedBy = currentUser.sub;
@@ -221,6 +235,7 @@ export class AlertsService {
       alertId: saved.id,
       closedBy: currentUser.sub,
       closeCategory,
+      previousStatus,
     });
 
     return this.toDto(saved);
