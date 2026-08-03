@@ -705,4 +705,64 @@ describe("Cases module (e2e)", () => {
       expect(res.body.error.code).toBe("REJECTION_REASON_REQUIRED");
     });
   });
+
+  describe("PATCH /cases/:id/assign", () => {
+    it("reassigns the case and records a case_assignment_event row (index 1, after creation's index 0)", async () => {
+      const officerToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "assign-officer");
+      const { user: newAssignee } = await createUserFixture(ctx.adminDataSource, tenantAId, { email: "assign-target@test.dev", role: UserRole.INVESTIGATOR });
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${officerToken}`).send({ customerId: customer.id }).expect(201);
+
+      const res = await http()
+        .patch(`/cases/${created.body.data.id}/assign`)
+        .set("Authorization", `Bearer ${officerToken}`)
+        .send({ assignedTo: newAssignee.id })
+        .expect(200);
+      expect(res.body.data.assignedTo).toBe(newAssignee.id);
+
+      const events = await ctx.adminDataSource
+        .getRepository(CaseAssignmentEventEntity)
+        .find({ where: { tenantId: tenantAId, caseId: created.body.data.id }, order: { at: "ASC" } });
+      expect(events).toHaveLength(2);
+      expect(events[1].assignedTo).toBe(newAssignee.id);
+    });
+
+    it("unassigns with assignedTo: null", async () => {
+      const officerToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "assign-unassign");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${officerToken}`).send({ customerId: customer.id }).expect(201);
+
+      const res = await http()
+        .patch(`/cases/${created.body.data.id}/assign`)
+        .set("Authorization", `Bearer ${officerToken}`)
+        .send({ assignedTo: null })
+        .expect(200);
+      expect(res.body.data.assignedTo).toBeNull();
+    });
+
+    it("TENANT_ADMIN can reassign; INVESTIGATOR and VIEWER cannot (403)", async () => {
+      const officerToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "assign-setup");
+      const adminToken = await tokenFor(tenantAId, UserRole.TENANT_ADMIN, "assign-admin");
+      const investigatorToken = await tokenFor(tenantAId, UserRole.INVESTIGATOR, "assign-investigator");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${officerToken}`).send({ customerId: customer.id }).expect(201);
+
+      await http().patch(`/cases/${created.body.data.id}/assign`).set("Authorization", `Bearer ${adminToken}`).send({ assignedTo: null }).expect(200);
+      await http().patch(`/cases/${created.body.data.id}/assign`).set("Authorization", `Bearer ${investigatorToken}`).send({ assignedTo: null }).expect(403);
+    });
+
+    it("400 CASE_ALREADY_TERMINAL on a CLOSED case", async () => {
+      const officerToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "assign-terminal");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${officerToken}`).send({ customerId: customer.id }).expect(201);
+      await http().patch(`/cases/${created.body.data.id}/close`).set("Authorization", `Bearer ${officerToken}`).send({}).expect(200);
+
+      const res = await http()
+        .patch(`/cases/${created.body.data.id}/assign`)
+        .set("Authorization", `Bearer ${officerToken}`)
+        .send({ assignedTo: null })
+        .expect(400);
+      expect(res.body.error.code).toBe("CASE_ALREADY_TERMINAL");
+    });
+  });
 });

@@ -30,6 +30,7 @@ import { CaseEvidenceService } from "./case-evidence.service";
 import { CaseNotesService } from "./case-notes.service";
 import { CasesService } from "./cases.service";
 import { AddNoteDto } from "./dto/add-note.dto";
+import { AssignCaseDto } from "./dto/assign-case.dto";
 import { CloseCaseDto } from "./dto/close-case.dto";
 import { CreateCaseDto } from "./dto/create-case.dto";
 import { LinkAlertDto } from "./dto/link-alert.dto";
@@ -41,6 +42,7 @@ export const ANY_AUTHENTICATED = [UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, U
 export const CREATE_ROLES = [UserRole.COMPLIANCE_OFFICER, UserRole.INVESTIGATOR];
 export const NOTES_EVIDENCE_LINK_ROLES = [UserRole.COMPLIANCE_OFFICER, UserRole.INVESTIGATOR];
 export const COMPLIANCE_OFFICER_ONLY = [UserRole.COMPLIANCE_OFFICER];
+export const ASSIGN_ROLES = [UserRole.COMPLIANCE_OFFICER, UserRole.TENANT_ADMIN];
 
 export function requestMeta(req: Request) {
   return { ipAddress: req.ip ?? null, userAgent: req.header("user-agent") ?? null };
@@ -209,5 +211,18 @@ export class CasesController {
     @Req() req: Request,
   ) {
     return this.casesService.reject(qr, tenantId, id, dto.reason, currentUser, requestMeta(req));
+  }
+
+  @Patch(":id/assign")
+  @Roles(...ASSIGN_ROLES)
+  async assign(
+    @CurrentTenant() tenantId: string,
+    @CurrentQueryRunner() qr: QueryRunner,
+    @Param("id") id: string,
+    @Body() dto: AssignCaseDto,
+    @CurrentUser() currentUser: AuthUserContext,
+    @Req() req: Request,
+  ) {
+    return this.casesService.assign(qr, tenantId, id, dto.assignedTo, currentUser, requestMeta(req));
   }
 }

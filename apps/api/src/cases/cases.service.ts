@@ -220,6 +220,51 @@ export class CasesService {
     }
   }
 
+  /** Section 3.2/4.8 — not a status transition, but rejected on an already-
+   * terminal case (see this task's note above). */
+  async assign(
+    qr: QueryRunner,
+    tenantId: string,
+    caseId: string,
+    assignedTo: string | null,
+    currentUser: AuthUserContext,
+    meta: RequestMeta,
+  ): Promise<CaseDetailDto> {
+    const kase = await this.findEntity(qr, tenantId, caseId);
+    if (kase.status === CaseStatus.CLOSED || kase.status === CaseStatus.SAR_FILED) {
+      throw new BadRequestException({ code: "CASE_ALREADY_TERMINAL", message: "Cannot reassign a closed or filed case." });
+    }
+
+    const beforeState = { assignedTo: kase.assignedTo };
+    const now = new Date();
+
+    await qr.startTransaction();
+    try {
+      await qr.manager.getRepository(CaseEntity).update({ id: caseId }, { assignedTo });
+
+      const assignmentRepo = qr.manager.getRepository(CaseAssignmentEventEntity);
+      await assignmentRepo.save(assignmentRepo.create({ tenantId, caseId, assignedTo, assignedBy: currentUser.sub, at: now }));
+
+      await this.auditService.record(qr, {
+        tenantId,
+        userId: currentUser.sub,
+        action: "case.reassigned",
+        entityType: "case",
+        entityId: caseId,
+        beforeState,
+        afterState: { assignedTo },
+        ipAddress: meta.ipAddress,
+        userAgent: meta.userAgent,
+      });
+
+      await qr.commitTransaction();
+      return this.toDetail(qr, tenantId, caseId);
+    } catch (err) {
+      if (qr.isTransactionActive) await qr.rollbackTransaction();
+      throw err;
+    }
+  }
+
   /** Exact string from the frontend mock's DEFAULT_CLOSURE_REASON
    * (apps/web/src/lib/mock-data/routes.ts) — Section 3.2 requires reusing it verbatim. */
   private static readonly DEFAULT_CLOSURE_REASON = "False positive — no suspicious activity confirmed after investigation.";
