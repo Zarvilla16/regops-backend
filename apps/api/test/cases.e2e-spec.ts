@@ -744,11 +744,13 @@ describe("Cases module (e2e)", () => {
       const officerToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "assign-setup");
       const adminToken = await tokenFor(tenantAId, UserRole.TENANT_ADMIN, "assign-admin");
       const investigatorToken = await tokenFor(tenantAId, UserRole.INVESTIGATOR, "assign-investigator");
+      const viewerToken = await tokenFor(tenantAId, UserRole.VIEWER, "assign-viewer");
       const customer = await createCustomer(tenantAId);
       const created = await http().post("/cases").set("Authorization", `Bearer ${officerToken}`).send({ customerId: customer.id }).expect(201);
 
       await http().patch(`/cases/${created.body.data.id}/assign`).set("Authorization", `Bearer ${adminToken}`).send({ assignedTo: null }).expect(200);
       await http().patch(`/cases/${created.body.data.id}/assign`).set("Authorization", `Bearer ${investigatorToken}`).send({ assignedTo: null }).expect(403);
+      await http().patch(`/cases/${created.body.data.id}/assign`).set("Authorization", `Bearer ${viewerToken}`).send({ assignedTo: null }).expect(403);
     });
 
     it("400 CASE_ALREADY_TERMINAL on a CLOSED case", async () => {
