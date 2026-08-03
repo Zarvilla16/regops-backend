@@ -21,6 +21,13 @@ import { RuleEntity } from "./entities/rule.entity";
 import { AlertEntity } from "./entities/alert.entity";
 import { RuleEvaluationEntity } from "./entities/rule-evaluation.entity";
 import { RuleReplayEntity } from "./entities/rule-replay.entity";
+import { CaseEntity } from "./entities/case.entity";
+import { CaseAlertEntity } from "./entities/case-alert.entity";
+import { CaseAssignmentEventEntity } from "./entities/case-assignment-event.entity";
+import { CaseNoteEntity } from "./entities/case-note.entity";
+import { CaseEvidenceEntity } from "./entities/case-evidence.entity";
+import { CaseApprovalEventEntity } from "./entities/case-approval-event.entity";
+import { ReportEntity } from "./entities/report.entity";
 
 dotenv.config();
 
@@ -45,6 +52,13 @@ export const entities = [
   AlertEntity,
   RuleEvaluationEntity,
   RuleReplayEntity,
+  CaseEntity,
+  CaseAlertEntity,
+  CaseAssignmentEventEntity,
+  CaseNoteEntity,
+  CaseEvidenceEntity,
+  CaseApprovalEventEntity,
+  ReportEntity,
 ];
 
 /**
