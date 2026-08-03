@@ -87,6 +87,12 @@ export class CasesController {
     return this.casesService.toDetail(qr, tenantId, id);
   }
 
+  @Get(":id/checklist")
+  @Roles(...ANY_AUTHENTICATED)
+  async checklist(@CurrentTenant() tenantId: string, @CurrentQueryRunner() qr: QueryRunner, @Param("id") id: string) {
+    return this.casesService.computeChecklist(qr, tenantId, id);
+  }
+
   @Post(":id/notes")
   @Roles(...NOTES_EVIDENCE_LINK_ROLES)
   async addNote(

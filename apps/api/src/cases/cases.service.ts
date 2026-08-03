@@ -1,9 +1,12 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { QueryRunner } from "typeorm";
-import { AlertEntity, CaseAlertEntity, CaseAssignmentEventEntity, CaseEntity, CaseEvidenceEntity, CaseNoteEntity, CustomerEntity } from "@regops/db";
+import { AlertEntity, CaseAlertEntity, CaseAssignmentEventEntity, CaseEntity, CaseEvidenceEntity, CaseNoteEntity, CustomerEntity, TransactionEntity } from "@regops/db";
 import {
   AlertSeverity,
+  AlertStatus,
   AuthUserContext,
+  CaseChecklistDto,
+  CaseChecklistItemDto,
   CaseCustomerSummaryDto,
   CaseDetailDto,
   CaseDto,
@@ -12,6 +15,8 @@ import {
   CaseNoteDto,
   CasePriority,
   CaseStatus,
+  RiskLevel,
+  TransactionDto,
 } from "@regops/shared";
 import { AuditService } from "../audit/audit.service";
 import { RequestMeta } from "../users/users.service";
@@ -187,6 +192,91 @@ export class CasesService {
       .getMany();
   }
 
+  /** Section 3.7: derived transitively via each linked alert's own
+   * evidence.relatedTransactionIds (the exact same field AlertsService.
+   * relatedTransactions reads for a single alert) — deduped and sorted by
+   * occurredAt. A case with zero linked alerts always has zero transactions
+   * here, regardless of what evidence records exist. */
+  async getDerivedTransactions(qr: QueryRunner, tenantId: string, caseId: string): Promise<TransactionDto[]> {
+    const alerts = await this.linkedAlerts(qr, tenantId, caseId);
+    const ids = new Set<string>();
+    for (const alert of alerts) {
+      const related = Array.isArray(alert.evidence?.relatedTransactionIds) ? (alert.evidence.relatedTransactionIds as string[]) : [];
+      for (const id of related) ids.add(id);
+    }
+    if (ids.size === 0) return [];
+
+    const rows = await qr.manager
+      .getRepository(TransactionEntity)
+      .createQueryBuilder("t")
+      .where("t.tenant_id = :tenantId", { tenantId })
+      .andWhere("t.id IN (:...ids)", { ids: Array.from(ids) })
+      .getMany();
+
+    return rows
+      .sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime())
+      .map((t) => ({
+        id: t.id,
+        tenantId: t.tenantId,
+        cbsTransactionId: t.cbsTransactionId,
+        customerId: t.customerId,
+        accountNumber: t.accountNumber,
+        amount: t.amount,
+        currency: t.currency,
+        type: t.type,
+        channel: t.channel,
+        counterpartyAccount: t.counterpartyAccount,
+        counterpartyBank: t.counterpartyBank,
+        counterpartyName: t.counterpartyName,
+        counterpartyCustomerId: t.counterpartyCustomerId,
+        narration: t.narration,
+        reference: t.reference,
+        balanceAfter: t.balanceAfter,
+        occurredAt: t.occurredAt.toISOString(),
+        ingestedAt: t.ingestedAt.toISOString(),
+        source: t.source,
+        ingestionBatchId: t.ingestionBatchId,
+      }));
+  }
+
+  /** Section 3.6 item 4: cadence by risk band — CRITICAL/HIGH 1 day, MEDIUM 7 days, LOW 30 days. */
+  private isRiskScoreCurrent(customer: CustomerEntity | null): boolean {
+    if (!customer || !customer.lastRiskCalculatedAt) return false;
+    const cadenceDays: Record<RiskLevel, number> = {
+      [RiskLevel.CRITICAL]: 1,
+      [RiskLevel.HIGH]: 1,
+      [RiskLevel.MEDIUM]: 7,
+      [RiskLevel.LOW]: 30,
+    };
+    const ageMs = Date.now() - customer.lastRiskCalculatedAt.getTime();
+    return ageMs <= cadenceDays[customer.riskLevel] * 24 * 60 * 60 * 1000;
+  }
+
+  /** Section 3.6 — the single source of truth for both GET /cases/:id/checklist
+   * and Task 8's submit-for-approval guard. Item 3 is deliberately stricter
+   * than item 1 (`every`, not `any`): a case with two linked alerts, one
+   * reviewed and one still NEW, passes item 1 but fails item 3. */
+  async computeChecklist(qr: QueryRunner, tenantId: string, caseId: string): Promise<CaseChecklistDto> {
+    const kase = await this.findEntity(qr, tenantId, caseId);
+    const alerts = await this.linkedAlerts(qr, tenantId, caseId);
+    const noteCount = await qr.manager.getRepository(CaseNoteEntity).count({ where: { tenantId, caseId } });
+    const transactions = await this.getDerivedTransactions(qr, tenantId, caseId);
+    const customer = await qr.manager.getRepository(CustomerEntity).findOne({ where: { id: kase.customerId, tenantId } });
+
+    const items: CaseChecklistItemDto[] = [
+      { key: "ALERT_REVIEWED", label: "At least one linked alert reviewed", passed: alerts.some((a) => a.status !== AlertStatus.NEW) },
+      { key: "NOTE_ADDED", label: "At least one investigation note added", passed: noteCount > 0 },
+      {
+        key: "TRANSACTIONS_REVIEWED",
+        label: "Linked transactions reviewed",
+        passed: transactions.length === 0 || alerts.every((a) => a.status !== AlertStatus.NEW),
+      },
+      { key: "RISK_SCORE_CURRENT", label: "Customer risk score is current", passed: this.isRiskScoreCurrent(customer) },
+    ];
+
+    return { items, complete: items.every((i) => i.passed) };
+  }
+
   toCustomerSummary(customer: CustomerEntity): CaseCustomerSummaryDto {
     return {
       id: customer.id,
@@ -240,9 +330,9 @@ export class CasesService {
       alerts: alerts.map((a) => ({ id: a.id, title: a.title, severity: a.severity, status: a.status, scenario: a.scenarioType })),
       notes: await this.listNotes(qr, tenantId, id),
       evidence: await this.listEvidence(qr, tenantId, id),
-      transactions: [],
+      transactions: await this.getDerivedTransactions(qr, tenantId, id),
       timeline: [],
-      checklist: { items: [], complete: false },
+      checklist: await this.computeChecklist(qr, tenantId, id),
       report: null,
     };
   }

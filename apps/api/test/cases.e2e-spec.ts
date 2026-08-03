@@ -1,8 +1,20 @@
 import request from "supertest";
 import * as crypto from "crypto";
 import { DataSource, QueryRunner } from "typeorm";
-import { AlertEntity, AuditLogEntity, CaseAssignmentEventEntity, CustomerEntity, RuleEntity } from "@regops/db";
-import { AlertSeverity, CasePriority, CaseStatus, CustomerType, RuleScenarioType, UserRole } from "@regops/shared";
+import { AlertEntity, AuditLogEntity, CaseAlertEntity, CaseAssignmentEventEntity, CustomerEntity, RuleEntity, TransactionEntity } from "@regops/db";
+import {
+  AlertSeverity,
+  AlertStatus,
+  CasePriority,
+  CaseStatus,
+  CustomerType,
+  RiskLevel,
+  RuleScenarioType,
+  TransactionChannel,
+  TransactionSource,
+  TransactionType,
+  UserRole,
+} from "@regops/shared";
 import { AlertsService } from "../src/rules/alerts/alerts.service";
 import {
   closeTestContext,
@@ -87,7 +99,12 @@ describe("Cases module (e2e)", () => {
     }
   }
 
-  async function createAlert(tenantId: string, customerId: string, severity: AlertSeverity = AlertSeverity.MEDIUM): Promise<AlertEntity> {
+  async function createAlert(
+    tenantId: string,
+    customerId: string,
+    severity: AlertSeverity = AlertSeverity.MEDIUM,
+    relatedTransactionIds: string[] = [],
+  ): Promise<AlertEntity> {
     const rule = await ctx.adminDataSource.getRepository(RuleEntity).findOneOrFail({ where: { tenantId, scenarioType: RuleScenarioType.LARGE_CASH } });
     const outcome = await withQr(tenantId, (qr) =>
       alertsService.createOrIncrement(qr, {
@@ -97,12 +114,40 @@ describe("Cases module (e2e)", () => {
         triggeringTransactionId: null,
         severity,
         title: "Cases-test alert",
-        evidence: {},
+        evidence: { relatedTransactionIds },
         dedupKey: `cases-test:${crypto.randomUUID()}`,
         firedAt: new Date(),
       }),
     );
     return outcome.alert;
+  }
+
+  async function createTransaction(tenantId: string, customerId: string, overrides: Partial<TransactionEntity> = {}): Promise<TransactionEntity> {
+    const repo = ctx.adminDataSource.getRepository(TransactionEntity);
+    return repo.save(
+      repo.create({
+        id: crypto.randomUUID(),
+        tenantId,
+        cbsTransactionId: `TXN-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        customerId,
+        accountNumber: "0123456789",
+        amount: "50000",
+        currency: "NGN",
+        type: TransactionType.CREDIT,
+        channel: TransactionChannel.MOBILE,
+        counterpartyAccount: null,
+        counterpartyBank: null,
+        counterpartyName: null,
+        counterpartyCustomerId: null,
+        narration: null,
+        reference: null,
+        balanceAfter: null,
+        occurredAt: new Date(),
+        source: TransactionSource.MANUAL,
+        ingestionBatchId: null,
+        ...overrides,
+      }),
+    );
   }
 
   describe("POST /cases — creation", () => {
@@ -340,6 +385,75 @@ describe("Cases module (e2e)", () => {
         .set("Authorization", `Bearer ${tokenViewer}`)
         .attach("file", Buffer.from("csv,data"), { filename: "x.csv", contentType: "text/csv" })
         .expect(403);
+    });
+  });
+
+  describe("GET /cases/:id/checklist", () => {
+    it("item 1/3 any-vs-every distinction: one reviewed + one still-NEW alert passes item 1 but fails item 3", async () => {
+      const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "checklist-any-every");
+      const customer = await createCustomer(tenantAId);
+      const txn = await createTransaction(tenantAId, customer.id);
+      const reviewedAlert = await createAlert(tenantAId, customer.id, AlertSeverity.MEDIUM, [txn.id]);
+      const newAlert = await createAlert(tenantAId, customer.id, AlertSeverity.MEDIUM, [txn.id]);
+      await ctx.adminDataSource.getRepository(AlertEntity).update({ id: reviewedAlert.id }, { status: AlertStatus.ASSIGNED });
+
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ alertId: reviewedAlert.id }).expect(201);
+      // Second alert linked directly (Task 7's link endpoint doesn't exist yet) —
+      // checklist logic only cares that a case_alert row exists, not how it got there.
+      await ctx.adminDataSource.getRepository(CaseAlertEntity).save(
+        ctx.adminDataSource.getRepository(CaseAlertEntity).create({
+          tenantId: tenantAId,
+          caseId: created.body.data.id,
+          alertId: newAlert.id,
+          linkedAt: new Date(),
+          linkedBy: created.body.data.createdBy,
+        }),
+      );
+
+      const res = await http().get(`/cases/${created.body.data.id}/checklist`).set("Authorization", `Bearer ${token}`).expect(200);
+      const byKey = Object.fromEntries(res.body.data.items.map((i: { key: string; passed: boolean }) => [i.key, i.passed]));
+      expect(byKey.ALERT_REVIEWED).toBe(true);
+      expect(byKey.TRANSACTIONS_REVIEWED).toBe(false);
+      expect(res.body.data.complete).toBe(false);
+    });
+
+    it("item 2 (note added) is independent of alerts", async () => {
+      const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "checklist-note");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
+
+      let res = await http().get(`/cases/${created.body.data.id}/checklist`).set("Authorization", `Bearer ${token}`).expect(200);
+      expect(res.body.data.items.find((i: { key: string }) => i.key === "NOTE_ADDED").passed).toBe(false);
+
+      await http().post(`/cases/${created.body.data.id}/notes`).set("Authorization", `Bearer ${token}`).send({ content: "note" }).expect(201);
+      res = await http().get(`/cases/${created.body.data.id}/checklist`).set("Authorization", `Bearer ${token}`).expect(200);
+      expect(res.body.data.items.find((i: { key: string }) => i.key === "NOTE_ADDED").passed).toBe(true);
+    });
+
+    it("item 4: false when lastRiskCalculatedAt is null; true when within the risk band's cadence; false when stale", async () => {
+      const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "checklist-risk");
+      const customerRepo = ctx.adminDataSource.getRepository(CustomerEntity);
+      const customer = await createCustomer(tenantAId, { riskLevel: RiskLevel.HIGH, lastRiskCalculatedAt: null });
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
+
+      let res = await http().get(`/cases/${created.body.data.id}/checklist`).set("Authorization", `Bearer ${token}`).expect(200);
+      expect(res.body.data.items.find((i: { key: string }) => i.key === "RISK_SCORE_CURRENT").passed).toBe(false);
+
+      await customerRepo.update({ id: customer.id }, { lastRiskCalculatedAt: new Date() }); // HIGH cadence = 1 day
+      res = await http().get(`/cases/${created.body.data.id}/checklist`).set("Authorization", `Bearer ${token}`).expect(200);
+      expect(res.body.data.items.find((i: { key: string }) => i.key === "RISK_SCORE_CURRENT").passed).toBe(true);
+
+      await customerRepo.update({ id: customer.id }, { lastRiskCalculatedAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000) });
+      res = await http().get(`/cases/${created.body.data.id}/checklist`).set("Authorization", `Bearer ${token}`).expect(200);
+      expect(res.body.data.items.find((i: { key: string }) => i.key === "RISK_SCORE_CURRENT").passed).toBe(false);
+    });
+
+    it("is included directly in GET /cases/:id detail", async () => {
+      const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "checklist-in-detail");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
+      const detail = await http().get(`/cases/${created.body.data.id}`).set("Authorization", `Bearer ${token}`).expect(200);
+      expect(detail.body.data.checklist.items).toHaveLength(4);
     });
   });
 });
