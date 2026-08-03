@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, forwardRef, ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { QueryRunner } from "typeorm";
 import {
   AlertEntity,
@@ -34,6 +34,7 @@ import {
 } from "@regops/shared";
 import { AuditService } from "../audit/audit.service";
 import { RequestMeta } from "../users/users.service";
+import { CaseTimelineService } from "./case-timeline.service";
 import { CreateCaseDto } from "./dto/create-case.dto";
 
 export interface CaseFilters {
@@ -45,7 +46,11 @@ export interface CaseFilters {
 
 @Injectable()
 export class CasesService {
-  constructor(private readonly auditService: AuditService) {}
+  constructor(
+    private readonly auditService: AuditService,
+    @Inject(forwardRef(() => CaseTimelineService))
+    private readonly caseTimelineService: CaseTimelineService,
+  ) {}
 
   /** Section 3.1: `CASE-<year>-####`, sequence = (max existing sequence for
    * this tenant+year) + 1 — recomputed per call, not a stored counter row
@@ -661,7 +666,7 @@ export class CasesService {
       notes: await this.listNotes(qr, tenantId, id),
       evidence: await this.listEvidence(qr, tenantId, id),
       transactions: await this.getDerivedTransactions(qr, tenantId, id),
-      timeline: [],
+      timeline: await this.caseTimelineService.build(qr, tenantId, kase),
       checklist: await this.computeChecklist(qr, tenantId, id),
       report: report ? { id: report.id, status: report.status } : null,
     };

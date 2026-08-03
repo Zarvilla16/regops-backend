@@ -817,4 +817,101 @@ describe("Cases module (e2e)", () => {
       expect(detail.body.data.status).toBe(CaseStatus.OPEN);
     });
   });
+
+  describe("Timeline assembly", () => {
+    it("assembles opened/reassigned/note/evidence/alert_linked/transaction/submitted/approved/sar_filed in chronological order", async () => {
+      const creatorToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "timeline-creator");
+      const submitterToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "timeline-submitter");
+      const customer = await createCustomer(tenantAId, { riskLevel: RiskLevel.LOW, lastRiskCalculatedAt: new Date() });
+      // occurredAt is pinned safely in the future (rather than left at its
+      // new Date() default) because this transaction fixture must be created
+      // BEFORE the alert/case (its id is needed for the alert's
+      // relatedTransactionIds), which would otherwise make the transaction's
+      // own occurredAt earlier than the case's createdAt — flipping the
+      // timeline's chronological order versus what this test asserts.
+      const txn = await createTransaction(tenantAId, customer.id, { narration: "Salary payment", occurredAt: new Date(Date.now() + 60 * 60 * 1000) });
+      const originalAlert = await createAlert(tenantAId, customer.id, AlertSeverity.MEDIUM, [txn.id]);
+
+      const created = await http().post("/cases").set("Authorization", `Bearer ${creatorToken}`).send({ alertId: originalAlert.id }).expect(201);
+      const caseId = created.body.data.id;
+
+      const { user: newAssignee } = await createUserFixture(ctx.adminDataSource, tenantAId, { email: "timeline-assignee@test.dev", role: UserRole.INVESTIGATOR });
+      await http().patch(`/cases/${caseId}/assign`).set("Authorization", `Bearer ${creatorToken}`).send({ assignedTo: newAssignee.id }).expect(200);
+      await http().post(`/cases/${caseId}/notes`).set("Authorization", `Bearer ${creatorToken}`).send({ content: "Reviewed the flagged transaction." }).expect(201);
+      await http()
+        .post(`/cases/${caseId}/evidence`)
+        .set("Authorization", `Bearer ${creatorToken}`)
+        .attach("file", Buffer.from("evidence,csv,data"), { filename: "notes.csv", contentType: "text/csv" })
+        .expect(201);
+      const secondAlert = await createAlert(tenantAId, customer.id, AlertSeverity.MEDIUM, [txn.id]);
+      await http().post(`/cases/${caseId}/alerts`).set("Authorization", `Bearer ${creatorToken}`).send({ alertId: secondAlert.id }).expect(201);
+      await ctx.adminDataSource.getRepository(AlertEntity).update({ id: originalAlert.id }, { status: AlertStatus.ASSIGNED });
+      await ctx.adminDataSource.getRepository(AlertEntity).update({ id: secondAlert.id }, { status: AlertStatus.ASSIGNED });
+
+      await http()
+        .patch(`/cases/${caseId}/submit`)
+        .set("Authorization", `Bearer ${submitterToken}`)
+        .send({ escalationRationale: "Confirmed pattern across both alerts." })
+        .expect(200);
+      await http().patch(`/cases/${caseId}/approve`).set("Authorization", `Bearer ${creatorToken}`).send({}).expect(200);
+
+      const detail = await http().get(`/cases/${caseId}`).set("Authorization", `Bearer ${creatorToken}`).expect(200);
+      const timeline: { type: string; at: string; actor: string; text: string }[] = detail.body.data.timeline;
+
+      // Exactly one "opened" (naming the creation-time alert), one "reassigned"
+      // (not two — index 0 is skipped), one "note", one "evidence", one
+      // "alert_linked" (only the post-creation link, not the creation-time one),
+      // one "transaction", one "submitted", one "approved", one "sar_filed".
+      const typeCounts = timeline.reduce<Record<string, number>>((acc, e) => ({ ...acc, [e.type]: (acc[e.type] ?? 0) + 1 }), {});
+      expect(typeCounts).toEqual({
+        opened: 1,
+        reassigned: 1,
+        note: 1,
+        evidence: 1,
+        alert_linked: 1,
+        transaction: 1,
+        submitted: 1,
+        approved: 1,
+        sar_filed: 1,
+      });
+
+      expect(timeline[0].type).toBe("opened");
+      expect(timeline[0].text).toBe(`Opened this case from alert "${originalAlert.title}".`);
+      expect(timeline.find((e) => e.type === "alert_linked")!.text).toBe(`Linked alert "${secondAlert.title}" to this case.`);
+      expect(timeline.find((e) => e.type === "transaction")!.text).toBe(`Credit transaction — Salary payment, ₦50,000 via Mobile.`);
+      expect(timeline.find((e) => e.type === "sar_filed")!.text).toBe("Approved and escalated this case for SAR filing.");
+
+      // Chronological order end-to-end.
+      const timestamps = timeline.map((e) => new Date(e.at).getTime());
+      expect(timestamps).toEqual([...timestamps].sort((a, b) => a - b));
+    });
+
+    it("a rejected-then-closed case shows a 'rejected' event (with reason) and a 'closed' terminal event, not 'sar_filed'", async () => {
+      const creatorToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "timeline-reject-close-creator");
+      const submitterToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "timeline-reject-close-submitter");
+      const customer = await createCustomer(tenantAId, { riskLevel: RiskLevel.LOW, lastRiskCalculatedAt: new Date() });
+      const alert = await createAlert(tenantAId, customer.id);
+      await ctx.adminDataSource.getRepository(AlertEntity).update({ id: alert.id }, { status: AlertStatus.ASSIGNED });
+      const created = await http().post("/cases").set("Authorization", `Bearer ${creatorToken}`).send({ alertId: alert.id }).expect(201);
+      await http().post(`/cases/${created.body.data.id}/notes`).set("Authorization", `Bearer ${creatorToken}`).send({ content: "note" }).expect(201);
+
+      await http()
+        .patch(`/cases/${created.body.data.id}/submit`)
+        .set("Authorization", `Bearer ${submitterToken}`)
+        .send({ escalationRationale: "x" })
+        .expect(200);
+      await http()
+        .patch(`/cases/${created.body.data.id}/reject`)
+        .set("Authorization", `Bearer ${creatorToken}`)
+        .send({ reason: "Not enough evidence yet." })
+        .expect(200);
+      await http().patch(`/cases/${created.body.data.id}/close`).set("Authorization", `Bearer ${creatorToken}`).send({}).expect(200);
+
+      const detail = await http().get(`/cases/${created.body.data.id}`).set("Authorization", `Bearer ${creatorToken}`).expect(200);
+      const timeline: { type: string; text: string }[] = detail.body.data.timeline;
+      expect(timeline.some((e) => e.type === "sar_filed")).toBe(false);
+      expect(timeline.find((e) => e.type === "rejected")!.text).toContain("Not enough evidence yet.");
+      expect(timeline.find((e) => e.type === "closed")).toBeTruthy();
+    });
+  });
 });

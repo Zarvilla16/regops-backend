@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { AuditModule } from "../audit/audit.module";
 import { CaseEvidenceService } from "./case-evidence.service";
 import { CaseNotesService } from "./case-notes.service";
+import { CaseTimelineService } from "./case-timeline.service";
 import { CasesController } from "./cases.controller";
 import { CasesService } from "./cases.service";
 import { AlertStatusListener } from "./listeners/alert-status.listener";
@@ -15,7 +16,7 @@ import { AlertStatusListener } from "./listeners/alert-status.listener";
 @Module({
   imports: [AuditModule],
   controllers: [CasesController],
-  providers: [CasesService, CaseNotesService, CaseEvidenceService, AlertStatusListener],
-  exports: [CasesService, CaseNotesService, CaseEvidenceService],
+  providers: [CasesService, CaseNotesService, CaseEvidenceService, CaseTimelineService, AlertStatusListener],
+  exports: [CasesService, CaseNotesService, CaseEvidenceService, CaseTimelineService],
 })
 export class CasesModule {}
