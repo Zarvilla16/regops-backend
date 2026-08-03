@@ -124,8 +124,27 @@ export class CaseEvidenceService {
 
   /** Proxied through the API (not a signed URL) — LocalFileStorage.getSignedDownloadUrl
    * always returns null, same reasoning as CustomersController's photo download. Still
-   * writes an audit row (Section 2.5: both upload and download are audit-logged), so
-   * this wraps that single write in its own savepoint like every other audited action. */
+   * writes an audit row (Section 2.5: both upload and download are audit-logged).
+   *
+   * Unlike every other audited write in this module, this one does NOT wrap the audit
+   * write in a nested transaction/savepoint. `qr` already has the request's outer
+   * transaction open (started by TenantContextMiddleware), and normally that outer
+   * transaction's real COMMIT is deferred until TransactionInterceptor runs, after this
+   * method's Promise resolves and control returns to Nest's response pipeline. That's
+   * fine for handlers that return a DTO through the normal Nest response path (e.g.
+   * `upload()` above) — but CasesController#downloadEvidence uses `@Res()` and calls
+   * `stream.pipe(res)` directly on the value this method returns, which starts writing
+   * bytes to the real HTTP response immediately, BEFORE TransactionInterceptor ever
+   * commits. For a small file, the client can see a fully-flushed download before the
+   * outer transaction's COMMIT has happened on Postgres, so the audit row wouldn't yet
+   * be durably visible to any other database connection — a compliance-audit-durability
+   * gap. So instead of opening a nested savepoint, we commit the ACTUAL outer transaction
+   * here, synchronously, before returning the stream to the controller: that's a real
+   * COMMIT, not a savepoint release, so the audit row is durable and visible to any other
+   * connection before a single byte is streamed. `qr.isTransactionActive` is correctly
+   * `false` after this returns; TransactionInterceptor's own
+   * `if (queryRunner.isTransactionActive) commitTransaction()` guard then no-ops for this
+   * request instead of double-committing. */
   async getStream(
     qr: QueryRunner,
     tenantId: string,
@@ -140,7 +159,6 @@ export class CaseEvidenceService {
 
     const stream = await this.storage.getReadStream(evidence.fileKey);
 
-    await qr.startTransaction();
     try {
       await this.auditService.record(qr, {
         tenantId,
