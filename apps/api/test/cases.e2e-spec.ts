@@ -324,6 +324,35 @@ describe("Cases module (e2e)", () => {
       const created = await http().post("/cases").set("Authorization", `Bearer ${tokenA}`).send({ customerId: customer.id }).expect(201);
       await http().post(`/cases/${created.body.data.id}/notes`).set("Authorization", `Bearer ${tokenB}`).send({ content: "x" }).expect(404);
     });
+
+    it("400 CASE_ALREADY_TERMINAL when the case is CLOSED", async () => {
+      const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "note-terminal");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
+      await ctx.adminDataSource.getRepository(CaseEntity).update({ id: created.body.data.id }, { status: CaseStatus.CLOSED });
+
+      const res = await http()
+        .post(`/cases/${created.body.data.id}/notes`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ content: "Trying to add a note after closure." })
+        .expect(400);
+      expect(res.body.error.code).toBe("CASE_ALREADY_TERMINAL");
+    });
+
+    it("auto-transitioning OPEN -> UNDER_INVESTIGATION writes a case.investigation_started audit row", async () => {
+      const token = await tokenFor(tenantAId, UserRole.INVESTIGATOR, "note-audit-transition");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
+      const caseId = created.body.data.id;
+
+      await http().post(`/cases/${caseId}/notes`).set("Authorization", `Bearer ${token}`).send({ content: "First note." }).expect(201);
+
+      const auditRows = await ctx.adminDataSource
+        .getRepository(AuditLogEntity)
+        .find({ where: { tenantId: tenantAId, entityId: caseId, action: "case.investigation_started" } });
+      expect(auditRows).toHaveLength(1);
+      expect(auditRows[0].entityId).toBe(caseId);
+    });
   });
 
   describe("Evidence upload/download", () => {

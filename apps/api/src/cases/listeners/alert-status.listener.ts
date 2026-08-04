@@ -43,7 +43,7 @@ export class AlertStatusListener {
       await this.withTenantContext(tenantId, async (qr) => {
         const link = await qr.manager.getRepository(CaseAlertEntity).findOne({ where: { tenantId, alertId } });
         if (!link) return; // this alert isn't linked to any case — nothing to transition
-        await this.casesService.maybeStartInvestigation(qr, tenantId, link.caseId);
+        await this.casesService.maybeStartInvestigation(qr, tenantId, link.caseId, null, null);
       });
     } catch (err) {
       this.logger.error(`Failed to process alert status change for case auto-transition (alert ${alertId})`, err as Error);

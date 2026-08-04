@@ -5,7 +5,7 @@ import { Readable } from "stream";
 import { QueryRunner } from "typeorm";
 import { CaseEvidenceEntity } from "@regops/db";
 import { FileStorage, LocalFileStorage } from "@regops/file-storage";
-import { AuthUserContext, CaseEvidenceDto } from "@regops/shared";
+import { AuthUserContext, CaseEvidenceDto, CaseStatus } from "@regops/shared";
 import { AuditService } from "../audit/audit.service";
 import { RequestMeta } from "../users/users.service";
 import { CasesService } from "./cases.service";
@@ -75,7 +75,10 @@ export class CaseEvidenceService {
       throw new BadRequestException({ code: "FILE_TOO_LARGE", message: "Evidence files must be 10MB or smaller." });
     }
 
-    await this.casesService.findEntity(qr, tenantId, caseId);
+    const kase = await this.casesService.findEntity(qr, tenantId, caseId);
+    if (kase.status === CaseStatus.CLOSED || kase.status === CaseStatus.SAR_FILED) {
+      throw new BadRequestException({ code: "CASE_ALREADY_TERMINAL", message: "Cannot upload evidence to a closed or filed case." });
+    }
 
     const evidenceId = crypto.randomUUID();
     const key = `tenants/${tenantId}/cases/${caseId}/evidence/${evidenceId}.${ext}`;
@@ -100,7 +103,7 @@ export class CaseEvidenceService {
         }),
       );
 
-      await this.casesService.maybeStartInvestigation(qr, tenantId, caseId);
+      await this.casesService.maybeStartInvestigation(qr, tenantId, caseId, currentUser.sub, meta);
 
       await this.auditService.record(qr, {
         tenantId,

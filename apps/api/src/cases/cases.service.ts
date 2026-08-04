@@ -488,12 +488,40 @@ export class CasesService {
    * invoke this inside their own already-open transaction — it does not
    * open or commit one itself. Silently no-ops on a stale/cross-tenant
    * caseId (the caller's own lookup already 404'd before reaching here in
-   * every real call site; this only guards a hypothetical race). */
-  async maybeStartInvestigation(qr: QueryRunner, tenantId: string, caseId: string): Promise<void> {
+   * every real call site; this only guards a hypothetical race).
+   *
+   * The status predicate lives IN the UPDATE's WHERE clause (not a prior
+   * read used as the sole gate) so Postgres re-evaluates `status = 'OPEN'`
+   * atomically as part of the write itself, after acquiring the row lock —
+   * a case closed by a concurrent request between an earlier read and this
+   * write can no longer be silently flipped back to UNDER_INVESTIGATION.
+   * `result.affected` tells us whether the predicate matched, replacing the
+   * old separate findOne()-then-check. Writes a `case.investigation_started`
+   * audit row in the same transaction as the status update, matching every
+   * other transition in this module — actor/meta are null on the event-
+   * driven (listener) call site, which has no HTTP request/user. */
+  async maybeStartInvestigation(
+    qr: QueryRunner,
+    tenantId: string,
+    caseId: string,
+    actor: string | null,
+    meta: { ipAddress: string | null; userAgent: string | null } | null,
+  ): Promise<void> {
     const repo = qr.manager.getRepository(CaseEntity);
-    const kase = await repo.findOne({ where: { id: caseId, tenantId } });
-    if (!kase || kase.status !== CaseStatus.OPEN) return;
-    await repo.update({ id: caseId }, { status: CaseStatus.UNDER_INVESTIGATION });
+    const result = await repo.update({ id: caseId, tenantId, status: CaseStatus.OPEN }, { status: CaseStatus.UNDER_INVESTIGATION });
+    if (!result.affected) return; // wasn't OPEN (or doesn't exist/wrong tenant) — no-op, same as before
+
+    await this.auditService.record(qr, {
+      tenantId,
+      userId: actor,
+      action: "case.investigation_started",
+      entityType: "case",
+      entityId: caseId,
+      beforeState: { status: CaseStatus.OPEN },
+      afterState: { status: CaseStatus.UNDER_INVESTIGATION },
+      ipAddress: meta?.ipAddress ?? null,
+      userAgent: meta?.userAgent ?? null,
+    });
   }
 
   async listNotes(qr: QueryRunner, tenantId: string, caseId: string): Promise<CaseNoteDto[]> {

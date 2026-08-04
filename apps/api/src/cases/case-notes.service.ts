@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable } from "@nestjs/common";
 import { QueryRunner } from "typeorm";
 import { CaseNoteEntity } from "@regops/db";
-import { AuthUserContext, CaseNoteDto } from "@regops/shared";
+import { AuthUserContext, CaseNoteDto, CaseStatus } from "@regops/shared";
 import { AuditService } from "../audit/audit.service";
 import { RequestMeta } from "../users/users.service";
 import { CasesService } from "./cases.service";
@@ -26,14 +26,17 @@ export class CaseNotesService {
       throw new BadRequestException({ code: "CONTENT_REQUIRED", message: "Note content is required." });
     }
 
-    await this.casesService.findEntity(qr, tenantId, caseId);
+    const kase = await this.casesService.findEntity(qr, tenantId, caseId);
+    if (kase.status === CaseStatus.CLOSED || kase.status === CaseStatus.SAR_FILED) {
+      throw new BadRequestException({ code: "CASE_ALREADY_TERMINAL", message: "Cannot add a note to a closed or filed case." });
+    }
 
     await qr.startTransaction();
     try {
       const repo = qr.manager.getRepository(CaseNoteEntity);
       const note = await repo.save(repo.create({ tenantId, caseId, userId: currentUser.sub, content: trimmed }));
 
-      await this.casesService.maybeStartInvestigation(qr, tenantId, caseId);
+      await this.casesService.maybeStartInvestigation(qr, tenantId, caseId, currentUser.sub, meta);
 
       await this.auditService.record(qr, {
         tenantId,
