@@ -1610,3 +1610,200 @@ the resolved Known Issues entry above), and the zero-`Rule`-row backfill CLI add
 the dev database (see the resolved Known Issues entry above) — three independent fixes, each verified
 with its own build/test/e2e pass plus a live `pnpm dev`/direct-database check, not just the automated
 suite.
+
+### Backend Prompt 6 (Case Management module) adds
+
+The final module of the v1 plan: case creation, notes, evidence, the escalation checklist, alert
+linking, the full five-state lifecycle (`OPEN` → `UNDER_INVESTIGATION` → `PENDING_APPROVAL` →
+`CLOSED`/`SAR_FILED`) with genuine two-person maker-checker on submit/approve/reject, reassignment,
+an `AlertStatusListener` reacting to a linked alert's own status changing, `Report` auto-creation on
+approval, and the full nine-event-type timeline assembly. Built on top of Prompts 1-5 with no changes
+to their guarantees.
+
+- **`packages/shared`**: `CaseStatus`/`CasePriority`/`CaseApprovalOutcome`/`ReportType`/`ReportStatus`
+  enums; `CaseDto`/`CaseCustomerSummaryDto`/`CaseAlertSummaryDto`/`CaseNoteDto`/`CaseEvidenceDto`/
+  `CaseChecklistItemDto`/`CaseChecklistDto`/`CaseTimelineEventDto`/`CaseReportSummaryDto`/
+  `CaseDetailDto`/`CaseListItemDto`/`ReportDto` wire types. `ALERT_EVENTS.STATUS_CHANGED` and
+  `AlertStatusChangedEvent` added to `apps/api/src/rules/rules.events.ts`; `AlertClosedEvent` gained a
+  `previousStatus` field — both needed so Cases can react to a linked alert moving off `NEW` (the
+  spec's third auto-transition trigger) without Prompt 5's `AlertsService` needing to know Cases
+  exists.
+- **`packages/db`**: `CaseEntity`, `CaseAlertEntity`, `CaseAssignmentEventEntity`, `CaseNoteEntity`,
+  `CaseEvidenceEntity`, `CaseApprovalEventEntity`, `ReportEntity`; migration
+  `1700000060000-Cases.ts` (all seven tables, a single-column unique index on `case_alert.alert_id`
+  alone — deliberately not composite on `(case_id, alert_id)`, per the migration's own inline comment
+  — enforcing "one case per alert" at the database level, plus `uq_report_case_id` enforcing "one
+  report per case," and the same RLS enable/force + policy pattern as every migration since Prompt 1).
+  `ReportEntity` is deliberately minimal (`id`/`tenantId`/`caseId`/`customerId`/`reportType`/`status`/
+  `generatedAt`/`generatedBy`/timestamps) — **a future Reports-module prompt will need to extend it
+  substantially** (narrative, flagged amount, submission fields, XML content) — this module only
+  seeds the row `case.approve` auto-creates.
+- **`apps/api/src/cases`**: `CasesService` (creation via all three entry points, the real five-state
+  lifecycle's four transitions plus reassignment, the escalation checklist — one method,
+  `computeChecklist()`, used by both the read endpoint and the submit-for-approval guard — and derived-
+  transaction lookup), `CaseNotesService`, `CaseEvidenceService` (FileStorage-backed, same
+  `LocalFileStorage` construction pattern as `CustomersService`/`CustomerIngestionService`),
+  `CaseTimelineService` (the denormalized nine-event-type timeline, resolved into `CasesService` via
+  `forwardRef()` since the two genuinely need each other), `AlertStatusListener` (the third
+  auto-transition trigger, subscribing to `alert.status_changed`/`alert.closed`), and 13 endpoints
+  (`POST /cases`, `GET /cases`, `GET /cases/:id`, `GET /cases/:id/checklist`, `POST /cases/:id/alerts`,
+  `POST /cases/:id/notes`, `POST /cases/:id/evidence`, `GET /cases/:id/evidence/:evidenceId`,
+  `PATCH /cases/:id/close`, `PATCH /cases/:id/submit`, `PATCH /cases/:id/approve`,
+  `PATCH /cases/:id/reject`, `PATCH /cases/:id/assign` — confirmed by direct count against
+  `cases.controller.ts` this session).
+- **`apps/api/src/rules/alerts/alerts.service.ts`**: `assign()` now emits `ALERT_EVENTS.STATUS_CHANGED`
+  when an alert's status actually changes; `close()`'s existing `ALERT_EVENTS.CLOSED` emission gained a
+  `previousStatus` field. Purely additive — no existing `ALERT_EVENTS.*` subscriber existed anywhere
+  before this prompt (confirmed by direct grep before making the change), so nothing that already
+  depended on these events' shape could have broken.
+- **Tests**: `apps/api/test/cases.e2e-spec.ts` — 47 tests across 11 `describe` blocks, covering
+  creation (all 3 entry points), the full state machine (every valid/invalid transition, maker-checker
+  both directions), all three auto-transition triggers independently, the escalation checklist (all 4
+  items, the any-vs-every distinction), alert linking (including the checklist-3 regression case),
+  evidence upload/download (byte-for-byte round trip, type/size validation, dual audit+timeline
+  entries), reassignment, Report auto-creation, the full assembled timeline (event ordering, all 9
+  types, the creation-time-vs-later-link distinction), tenant isolation, role gates, and RLS enforced
+  directly at the database level. This brings `apps/api`'s total e2e suite to **153** (up from 152),
+  across 10 suites — both numbers observed directly from this session's own `pnpm test:e2e` run, not
+  carried over from an earlier prompt's count.
+
+### Critical bugs found while building the Case Management module (fixed)
+
+Continuing the numbering above — this surfaced during a live code review of Task 7 (evidence
+upload/download), in the same session that built it, before Task 12 began.
+
+23. **`CaseEvidenceService.getStream()` (evidence download) wrote its `case.evidence_downloaded` audit
+    row inside a nested transaction/savepoint, but the controller's `@Res()`-based
+    `stream.pipe(res)` bypasses `TransactionInterceptor`'s normal commit-before-response guarantee —
+    so a client could receive a fully-streamed file before the audit row was durably committed and
+    visible to any other database connection.** Root cause: every other audited write in this module
+    (upload, notes, state transitions, etc.) returns a plain DTO through Nest's ordinary response
+    pipeline, so `TransactionInterceptor` gets a chance to run and commit the request's real outer
+    transaction (opened by `TenantContextMiddleware`) before the response body is ever sent — wrapping
+    the audit write in a nested savepoint inside that still-open outer transaction was therefore
+    "audit row visible once the interceptor commits," same as everywhere else. `downloadEvidence`
+    breaks that assumption: it uses `@Res()` and pipes the file stream straight to the raw HTTP
+    response object, which starts flushing bytes to the client immediately once `getStream()` resolves
+    — well before `TransactionInterceptor` ever runs. A small file's download could complete, client
+    side, while the audit row was still sitting in an uncommitted outer transaction, invisible to any
+    other Postgres connection — a genuine compliance-audit-durability gap, not a cosmetic ordering
+    issue, for a system whose entire purpose is producing a trustworthy audit trail. **Symptom**:
+    reproducible by manually stepping through the request — the download response body was fully
+    available to the client before a direct `SELECT` from a second connection could see the
+    corresponding `audit_log` row. **Fix**: `getStream()` no longer opens a nested savepoint; it
+    commits the *actual* outer transaction (`await qr.commitTransaction()`) itself, synchronously,
+    immediately after writing the audit row and before returning the stream to the controller — a
+    real `COMMIT`, not a savepoint release, so the audit row is durable before a single byte is
+    streamed. `TransactionInterceptor`'s own `if (queryRunner.isTransactionActive) commitTransaction()`
+    guard correctly no-ops afterward instead of double-committing, since `qr.isTransactionActive` is
+    `false` by the time it runs. **Verified**: confirmed as a genuine, reproducible race (not a flaky
+    test) before the fix, then fixed and re-verified — the evidence round-trip e2e test (which asserts
+    the `case.evidence_downloaded` audit row is visible via a *separate* connection,
+    `ctx.adminDataSource`, immediately after the download response completes) was run **10 times in a
+    row** during this Task 12 session with zero failures, plus a full `apps/api` e2e pass (153/153)
+    and the full workspace `pnpm lint && pnpm typecheck && pnpm test && pnpm test:e2e` run, both green.
+
+### Deviations from the Backend Prompt 6 spec (and why)
+
+1. **`AlertCriticalFiredEvent` (added in Prompt 5) has no subscriber.** Its docblock, written during
+   Prompt 5, anticipated "Prompt 6's Case Management subscribes to auto-open a Case" — but this
+   prompt's actual written spec never asks for auto-case-creation from a critical alert, and the
+   frontend mock it's built from is explicit (`docs/cases-module-frontend-inventory.md` §3): "Nothing
+   else in the app auto-opens a case... every case in the live (non-seeded) data path is created by an
+   explicit user action." Per the spec's own rule ("where this prompt's design differs from the mock,
+   the difference is called out explicitly in §2 — everything else should be read as match the mock's
+   behavior"), silence here means match the mock. The stale docblock was corrected in place rather
+   than left misleading. Confirmed this session by grep: `AlertCriticalFiredEvent`/`CRITICAL_FIRED`
+   appear only in `apps/api/src/rules/rules.events.ts`, `apps/api/src/rules/queue/rule-evaluation-
+   queue.service.ts`, and `apps/worker/src/rules/evaluate-rules.processor.ts` — all emitters, no
+   subscriber anywhere under `apps/api/src/cases`.
+2. **Role-gate rejections return `403 FORBIDDEN_ROLE`, not literally `FORBIDDEN`.** This is the
+   existing, already-established error code the shared `RolesGuard` has produced for every role-gated
+   endpoint since Prompt 1 — introducing a second, bespoke `FORBIDDEN` code for this module alone would
+   fragment the convention, not follow the spec more closely.
+3. **Reassignment (`PATCH /cases/:id/assign`) rejects an already-terminal case with `400
+   CASE_ALREADY_TERMINAL`**, reusing the same code the alert-linking guard uses for the identical
+   concept, even though the endpoint-level error list doesn't separately enumerate it for this
+   endpoint. The state-machine section's own wording — reassignment "can happen at any non-terminal
+   status" — reads as an explicit guard, not merely descriptive.
+4. **`case_number` generation and alert-linking's "already linked" check both have a narrow,
+   accepted concurrent-race window.** `nextCaseNumber()` recomputes `(max existing sequence) + 1` per
+   call rather than using a stored counter (per the spec's own explicit instruction not to introduce a
+   counter table); two truly simultaneous case creations for the same tenant+year could in principle
+   collide and have the second insert rejected by the `(tenant_id, case_number)` unique index. Alert
+   linking's `case_alert` existence pre-check has the same class of narrow window before its own
+   unique-on-`alert_id` index would catch a genuine double-link. Neither is additionally guarded with
+   an advisory lock — the spec doesn't ask for one, and the mock's own `nextCaseNumber` has the
+   identical non-atomic property.
+5. **Evidence upload (`POST /cases/:id/evidence`) sets no Multer `limits.fileSize`.** Unlike
+   `CustomersController`'s photo upload (which relies on Multer's own size limit and accepts whatever
+   generic error results from exceeding it), the spec requires the exact code `400 FILE_TOO_LARGE` —
+   checked explicitly in `CaseEvidenceService.upload()` against the buffered `file.size`, after Multer
+   has already accepted the full upload into memory. Confirmed this session: `cases.controller.ts`
+   line 130 has an explicit comment noting the omission is deliberate, and `case-evidence.service.ts`
+   throws `400 FILE_TOO_LARGE` directly.
+6. **Timeline event `text` embeds raw user ids** (e.g. "Reassigned this case to `<uuid>`") rather than
+   a resolved display name, unlike the mock's `buildTimeline` (which resolves names from a
+   separately-fetched `users` array). No DTO anywhere else in this backend resolves a user id to a
+   display name either (`AuditLog`, `CaseNoteDto.userId`, `AlertDto.assignedTo`, etc. all store raw
+   ids) — the consuming frontend is expected to resolve ids itself, exactly as it already does
+   elsewhere. Confirmed by reading `case-timeline.service.ts` directly this session.
+
+### Known issues / incomplete items (Backend Prompt 6)
+
+- **No service-level unit tests for `CasesService`/`CaseNotesService`/`CaseEvidenceService`/
+  `CaseTimelineService`.** Same standing gap as every prior prompt (Prompt 1's Known Issues first
+  flagged this) — all coverage is e2e-only, against a real Postgres.
+- **Swagger coverage is `@ApiTags`/`@ApiBearerAuth` only**, no per-DTO `@ApiProperty()` richness in
+  the generated schema — the CLI plugin that would make decorators unnecessary was never enabled
+  (flagged repeatedly since Prompt 1; not something this prompt was asked to fix).
+- **The `case_number`/alert-linking race windows described in Deviations #4 are real, if narrow** —
+  disclosed rather than silently accepted.
+- **`GET /cases/:id/checklist` and `GET /cases/:id`'s embedded `checklist` field call the exact same
+  `computeChecklist()` — verified by code review (one method, two call sites), not by a dedicated test
+  asserting the two responses are byte-identical for the same case.**
+- **The frontend's mock-data API layer was not reconciled against this real backend in this
+  session** — same "backend ships first, frontend re-pointed in a later pass" pattern already used for
+  every prior prompt.
+
+### Definition of Done — Backend Prompt 6 — verified vs. not verified
+
+| # | Item | Status |
+|---|---|---|
+| 1 | Migration applies cleanly (7 tables, RLS enable/force + policies, unique index on `case_alert.alert_id`) | ✅ Verified — `pnpm db:migrate` this session reports "No migrations are pending" (already applied); direct `psql` queries this session confirm all 7 tables (`case`, `case_alert`, `case_note`, `case_evidence`, `case_approval_event`, `case_assignment_event`, `report`) have `relrowsecurity`/`relforcerowsecurity` both `t`, and `case_alert` has a genuine single-column `UNIQUE` btree index (`uq_case_alert_alert_id`, no `WHERE` clause — a plain unique index on one column, not a Postgres partial index) |
+| 2 | Case creation: all 3 entry points, field resolution/validation order, auto-set fields, role gate | ✅ Verified — `POST /cases — creation` describe block, re-run this session as part of the full `apps/api` e2e pass (153/153) |
+| 3 | Real five-state lifecycle: every valid transition succeeds, every invalid transition rejected with the correct code | ✅ Verified — `State machine: close/submit/approve/reject` describe block, same full-suite run |
+| 4 | Auto-transition to `UNDER_INVESTIGATION`: all 3 triggers (note, evidence, linked-alert status change) independently verified, no re-fire/duplicate | ✅ Verified — `POST /cases/:id/notes`, `Evidence upload/download`, and `Alert status-change auto-transition` describe blocks, same run |
+| 5 | Genuine two-person maker-checker: submitter-cannot-be-assignee, approver-cannot-be-submitter (both directions), checklist gate, rationale/reason requirements | ✅ Verified — `State machine` describe block, same run |
+| 6 | Escalation checklist: all 4 items independently true/false, any-vs-every distinction (items 1 vs 3) | ✅ Verified — `GET /cases/:id/checklist` describe block, same run |
+| 7 | Alert linking: success, customer-mismatch, already-linked, terminal-case rejection, checklist-3 regression | ✅ Verified — `POST /cases/:id/alerts` describe block, same run |
+| 8 | Evidence: FileStorage upload/download byte-for-byte round trip, type/size validation, dual audit+timeline entries | ✅ Verified — `Evidence upload/download` describe block; the byte-for-byte/audit-durability test additionally re-run 10 times in isolation this session with zero failures (see the bug entry above) |
+| 9 | Report auto-creation on approval: exactly one row, correct `caseId`/`customerId`, second approval impossible (case already terminal) | ✅ Verified — `State machine` describe block; `uq_report_case_id` confirmed live via `psql` this session as the DB-level backstop |
+| 10 | Timeline: all 9 event types, correct chronological ordering, creation-time-vs-later-link distinction, index-0 assignment skip | ✅ Verified — `Timeline assembly` describe block, same run |
+| 11 | Tenant isolation: every endpoint 404s (not 403s) for a cross-tenant case/note/evidence/alert-link | ✅ Verified — cross-tenant assertions embedded throughout the suite (e.g. `GET /cases/:id`, `POST /cases/:id/notes`), same run |
+| 12 | Role gates: every action tested against every role, allowed and rejected | ✅ Verified — `403 FORBIDDEN_ROLE` assertions across every describe block, same run |
+| 13 | RLS enforced at the database level (not just application-level tenant filtering) | ✅ Verified — the new `RLS enforced at the database level` describe block added in this task: connects as `regops_app` via a raw `DataSource` with **no** `set_config` at all, and a direct `SELECT * FROM "case" WHERE id = $1` against a row just created (confirmed to exist via the `201` response) returns 0 rows; run both as part of the full suite (153/153) and in isolation this session (`PASS`, 1/1) |
+| 14 | `pnpm lint && pnpm typecheck && pnpm test && pnpm test:e2e` all pass across every workspace package | ✅ Verified — full run this session: **lint** 15/15 tasks green across all 9 lintable packages (`api`, `db`, `file-storage`, `risk-engine`, `rules-engine`, `screening-engine`, `shared`, `web`, `worker`; `config` has no lint script); **typecheck** 15/15 tasks green, same packages; **test** (unit) 12/12 tasks green — `apps/api` 20/20 (3 suites), `apps/worker` 10/10 (1 suite), `packages/risk-engine` 64/64 (9 suites), `packages/rules-engine` 41/41 (6 suites), `packages/screening-engine` 40/40 (7 suites), `apps/web` has no unit tests yet; **test:e2e** 9/9 tasks green — `apps/api` **153/153** across 10 suites, `apps/worker` **37/37** across 6 non-benchmark suites (2 benchmark suites intentionally skipped, same as every prior prompt), `apps/web` has no e2e tests yet |
+
+**Bottom line**: every behavior this module claims is genuinely proven against a real Postgres this
+session, not carried forward from an earlier prompt's numbers — the full workspace
+`pnpm lint && pnpm typecheck && pnpm test && pnpm test:e2e` run is green end to end (`apps/api` e2e
+153/153 across 10 suites, `apps/worker` e2e 37/37 across 6 non-benchmark suites, unit tests green
+across every package that has them), and the new database-level RLS test does what it's supposed to:
+prove that a row which genuinely exists (created via a real `201` response the test itself triggers)
+is completely invisible to a raw `regops_app` connection with no tenant context set, closing the same
+class of gap Backend Prompt 4's partition-level RLS test was written to catch — this module's RLS
+policies are not merely trusted by inheritance from earlier prompts' migration pattern, they were
+independently re-verified against this module's own tables. One real, non-cosmetic bug was found and
+fixed in this module: `CaseEvidenceService.getStream()` was committing its audit row inside a nested
+savepoint instead of the request's real outer transaction, meaning a compliance officer's evidence
+download could complete client-side before the corresponding `case.evidence_downloaded` audit row was
+durably visible to any other database connection — a genuine audit-durability gap in a system whose
+core purpose is producing a trustworthy audit trail, not a cosmetic ordering issue. It's fixed, and
+verified fixed (not just written) by 10 repeated runs of the affected test with zero failures, on top
+of the full suite pass. Three disclosed gaps remain, consistent with every prior prompt's honesty bar
+rather than assumed away: the `case_number`/alert-linking race windows (Deviations #4, narrow and
+accepted, matching the mock's own non-atomic behavior), no service-level unit tests for the four new
+services (e2e-only coverage, the same standing gap since Prompt 1), and the frontend not yet
+reconciled against this real backend (the established "backend ships first" pattern for this
+codebase). With this task, all 12 tasks of the Case Management module plan are complete.

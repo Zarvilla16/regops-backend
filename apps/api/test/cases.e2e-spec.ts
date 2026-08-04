@@ -914,4 +914,28 @@ describe("Cases module (e2e)", () => {
       expect(timeline.find((e) => e.type === "closed")).toBeTruthy();
     });
   });
+
+  describe("RLS enforced at the database level (not just application-level tenant filtering)", () => {
+    it('querying "case" directly under regops_app with no tenant context set returns 0 rows', async () => {
+      const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "rls-direct");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
+
+      const rawAppDataSource = new DataSource({ type: "postgres", url: process.env.DATABASE_URL, entities: [] });
+      await rawAppDataSource.initialize();
+      try {
+        const qr = rawAppDataSource.createQueryRunner();
+        await qr.connect();
+        try {
+          // No set_config at all — a connection with no tenant context whatsoever.
+          const rows = await qr.query(`SELECT * FROM "case" WHERE id = $1`, [created.body.data.id]);
+          expect(rows).toHaveLength(0);
+        } finally {
+          await qr.release();
+        }
+      } finally {
+        await rawAppDataSource.destroy();
+      }
+    });
+  });
 });
