@@ -1,7 +1,7 @@
 import request from "supertest";
 import * as crypto from "crypto";
 import { DataSource, QueryRunner } from "typeorm";
-import { AlertEntity, AuditLogEntity, CaseAlertEntity, CaseAssignmentEventEntity, CaseEntity, CustomerEntity, ReportEntity, RuleEntity, TransactionEntity } from "@regops/db";
+import { AlertEntity, AuditLogEntity, CaseAlertEntity, CaseAssignmentEventEntity, CaseEntity, CaseSubmissionEventEntity, CustomerEntity, ReportEntity, RuleEntity, TransactionEntity } from "@regops/db";
 import {
   AlertSeverity,
   AlertStatus,
@@ -227,6 +227,13 @@ describe("Cases module (e2e)", () => {
       await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(403);
     });
 
+    it("403 FORBIDDEN_ROLE for SUPER_ADMIN (CREATE_ROLES is COMPLIANCE_OFFICER/INVESTIGATOR only)", async () => {
+      const token = await tokenFor(tenantAId, UserRole.SUPER_ADMIN, "super-admin-create");
+      const customer = await createCustomer(tenantAId);
+      const res = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(403);
+      expect(res.body.error.code).toBe("FORBIDDEN_ROLE");
+    });
+
     it("a customer/alert from a different tenant is 404, not visible cross-tenant", async () => {
       const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "cross-tenant");
       const otherTenantCustomer = await createCustomer(tenantBId);
@@ -315,6 +322,19 @@ describe("Cases module (e2e)", () => {
       const customer = await createCustomer(tenantAId);
       const created = await http().post("/cases").set("Authorization", `Bearer ${tokenCreator}`).send({ customerId: customer.id }).expect(201);
       await http().post(`/cases/${created.body.data.id}/notes`).set("Authorization", `Bearer ${tokenViewer}`).send({ content: "x" }).expect(403);
+    });
+
+    it("403 FORBIDDEN_ROLE for SUPER_ADMIN (NOTES_EVIDENCE_LINK_ROLES is COMPLIANCE_OFFICER/INVESTIGATOR only)", async () => {
+      const tokenCreator = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "note-super-admin-setup");
+      const tokenSuperAdmin = await tokenFor(tenantAId, UserRole.SUPER_ADMIN, "note-super-admin");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${tokenCreator}`).send({ customerId: customer.id }).expect(201);
+      const res = await http()
+        .post(`/cases/${created.body.data.id}/notes`)
+        .set("Authorization", `Bearer ${tokenSuperAdmin}`)
+        .send({ content: "x" })
+        .expect(403);
+      expect(res.body.error.code).toBe("FORBIDDEN_ROLE");
     });
 
     it("404 CASE_NOT_FOUND for a case in a different tenant", async () => {
@@ -428,6 +448,40 @@ describe("Cases module (e2e)", () => {
         .attach("file", Buffer.from("csv,data"), { filename: "x.csv", contentType: "text/csv" })
         .expect(403);
     });
+
+    it("403 FORBIDDEN_ROLE for SUPER_ADMIN on upload (NOTES_EVIDENCE_LINK_ROLES is COMPLIANCE_OFFICER/INVESTIGATOR only)", async () => {
+      const tokenCreator = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "evidence-super-admin-setup");
+      const tokenSuperAdmin = await tokenFor(tenantAId, UserRole.SUPER_ADMIN, "evidence-super-admin-upload");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${tokenCreator}`).send({ customerId: customer.id }).expect(201);
+      const res = await http()
+        .post(`/cases/${created.body.data.id}/evidence`)
+        .set("Authorization", `Bearer ${tokenSuperAdmin}`)
+        .attach("file", Buffer.from("csv,data"), { filename: "x.csv", contentType: "text/csv" })
+        .expect(403);
+      expect(res.body.error.code).toBe("FORBIDDEN_ROLE");
+    });
+
+    it("200 for SUPER_ADMIN on download — evidence download is ANY_AUTHENTICATED, not role-restricted beyond authentication", async () => {
+      const tokenCreator = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "evidence-super-admin-dl-setup");
+      const tokenSuperAdmin = await tokenFor(tenantAId, UserRole.SUPER_ADMIN, "evidence-super-admin-download");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${tokenCreator}`).send({ customerId: customer.id }).expect(201);
+      // application/pdf, matching the existing byte-for-byte round-trip test — supertest/superagent
+      // parses a text/csv response body as text rather than a raw Buffer, which breaks Buffer.compare.
+      const fileContents = Buffer.from("%PDF-1.4 super admin download test");
+      const uploadRes = await http()
+        .post(`/cases/${created.body.data.id}/evidence`)
+        .set("Authorization", `Bearer ${tokenCreator}`)
+        .attach("file", fileContents, { filename: "x.pdf", contentType: "application/pdf" })
+        .expect(201);
+
+      const downloadRes = await http()
+        .get(`/cases/${created.body.data.id}/evidence/${uploadRes.body.data.id}`)
+        .set("Authorization", `Bearer ${tokenSuperAdmin}`)
+        .expect(200);
+      expect(Buffer.compare(downloadRes.body, fileContents)).toBe(0);
+    });
   });
 
   describe("GET /cases/:id/checklist", () => {
@@ -496,6 +550,17 @@ describe("Cases module (e2e)", () => {
       const created = await http().post("/cases").set("Authorization", `Bearer ${token}`).send({ customerId: customer.id }).expect(201);
       const detail = await http().get(`/cases/${created.body.data.id}`).set("Authorization", `Bearer ${token}`).expect(200);
       expect(detail.body.data.checklist.items).toHaveLength(4);
+    });
+
+    it("200 for every role (SUPER_ADMIN/TENANT_ADMIN/COMPLIANCE_OFFICER/INVESTIGATOR/VIEWER) — ANY_AUTHENTICATED, not role-restricted beyond authentication", async () => {
+      const creatorToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "checklist-role-gate-setup");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${creatorToken}`).send({ customerId: customer.id }).expect(201);
+
+      for (const role of [UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN, UserRole.COMPLIANCE_OFFICER, UserRole.INVESTIGATOR, UserRole.VIEWER]) {
+        const token = await tokenFor(tenantAId, role, `checklist-role-${role.toLowerCase()}`);
+        await http().get(`/cases/${created.body.data.id}/checklist`).set("Authorization", `Bearer ${token}`).expect(200);
+      }
     });
   });
 
@@ -593,6 +658,20 @@ describe("Cases module (e2e)", () => {
         .expect(404);
       expect(res.body.error.code).toBe("ALERT_NOT_FOUND");
     });
+
+    it("403 FORBIDDEN_ROLE for SUPER_ADMIN (NOTES_EVIDENCE_LINK_ROLES is COMPLIANCE_OFFICER/INVESTIGATOR only)", async () => {
+      const tokenCreator = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "link-super-admin-setup");
+      const tokenSuperAdmin = await tokenFor(tenantAId, UserRole.SUPER_ADMIN, "link-super-admin");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${tokenCreator}`).send({ customerId: customer.id }).expect(201);
+      const alert = await createAlert(tenantAId, customer.id);
+      const res = await http()
+        .post(`/cases/${created.body.data.id}/alerts`)
+        .set("Authorization", `Bearer ${tokenSuperAdmin}`)
+        .send({ alertId: alert.id })
+        .expect(403);
+      expect(res.body.error.code).toBe("FORBIDDEN_ROLE");
+    });
   });
 
   describe("State machine: close/submit/approve/reject", () => {
@@ -629,6 +708,44 @@ describe("Cases module (e2e)", () => {
       await http().patch(`/cases/${created.body.data.id}/reject`).set("Authorization", `Bearer ${investigatorToken}`).send({ reason: "x" }).expect(403);
     });
 
+    it("403 FORBIDDEN_ROLE for SUPER_ADMIN on close/submit/approve/reject (COMPLIANCE_OFFICER_ONLY)", async () => {
+      const superAdminToken = await tokenFor(tenantAId, UserRole.SUPER_ADMIN, "role-gate-super-admin");
+      const officerToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "role-gate-super-admin-setup");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${officerToken}`).send({ customerId: customer.id }).expect(201);
+
+      let res = await http().patch(`/cases/${created.body.data.id}/close`).set("Authorization", `Bearer ${superAdminToken}`).send({}).expect(403);
+      expect(res.body.error.code).toBe("FORBIDDEN_ROLE");
+      res = await http().patch(`/cases/${created.body.data.id}/submit`).set("Authorization", `Bearer ${superAdminToken}`).send({ escalationRationale: "x" }).expect(403);
+      expect(res.body.error.code).toBe("FORBIDDEN_ROLE");
+      res = await http().patch(`/cases/${created.body.data.id}/approve`).set("Authorization", `Bearer ${superAdminToken}`).send({}).expect(403);
+      expect(res.body.error.code).toBe("FORBIDDEN_ROLE");
+      res = await http().patch(`/cases/${created.body.data.id}/reject`).set("Authorization", `Bearer ${superAdminToken}`).send({ reason: "x" }).expect(403);
+      expect(res.body.error.code).toBe("FORBIDDEN_ROLE");
+    });
+
+    it("403 FORBIDDEN_ROLE for VIEWER and TENANT_ADMIN on approve/reject specifically (COMPLIANCE_OFFICER_ONLY)", async () => {
+      const creatorToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "approve-reject-role-gate-creator");
+      const submitterToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "approve-reject-role-gate-submitter");
+      const viewerToken = await tokenFor(tenantAId, UserRole.VIEWER, "approve-reject-role-gate-viewer");
+      const tenantAdminToken = await tokenFor(tenantAId, UserRole.TENANT_ADMIN, "approve-reject-role-gate-admin");
+      const { caseId } = await buildEscalatableCase(tenantAId, creatorToken);
+      await http()
+        .patch(`/cases/${caseId}/submit`)
+        .set("Authorization", `Bearer ${submitterToken}`)
+        .send({ escalationRationale: "Escalating." })
+        .expect(200);
+
+      let res = await http().patch(`/cases/${caseId}/approve`).set("Authorization", `Bearer ${viewerToken}`).send({}).expect(403);
+      expect(res.body.error.code).toBe("FORBIDDEN_ROLE");
+      res = await http().patch(`/cases/${caseId}/approve`).set("Authorization", `Bearer ${tenantAdminToken}`).send({}).expect(403);
+      expect(res.body.error.code).toBe("FORBIDDEN_ROLE");
+      res = await http().patch(`/cases/${caseId}/reject`).set("Authorization", `Bearer ${viewerToken}`).send({ reason: "x" }).expect(403);
+      expect(res.body.error.code).toBe("FORBIDDEN_ROLE");
+      res = await http().patch(`/cases/${caseId}/reject`).set("Authorization", `Bearer ${tenantAdminToken}`).send({ reason: "x" }).expect(403);
+      expect(res.body.error.code).toBe("FORBIDDEN_ROLE");
+    });
+
     it("403 SUBMITTER_CANNOT_BE_ASSIGNEE when the case's own assignee tries to submit it", async () => {
       const token = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "submit-self-assignee");
       const { caseId } = await buildEscalatableCase(tenantAId, token); // creator == assignee == token's user
@@ -638,6 +755,24 @@ describe("Cases module (e2e)", () => {
         .send({ escalationRationale: "Escalating for SAR filing." })
         .expect(403);
       expect(res.body.error.code).toBe("SUBMITTER_CANNOT_BE_ASSIGNEE");
+    });
+
+    it("403 APPROVER_CANNOT_BE_SUBMITTER when the submitter tries to reject their own submission", async () => {
+      const creatorToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "self-reject-creator");
+      const submitterToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "self-reject-submitter");
+      const { caseId } = await buildEscalatableCase(tenantAId, creatorToken);
+      await http()
+        .patch(`/cases/${caseId}/submit`)
+        .set("Authorization", `Bearer ${submitterToken}`)
+        .send({ escalationRationale: "Escalating for SAR filing." })
+        .expect(200);
+
+      const res = await http()
+        .patch(`/cases/${caseId}/reject`)
+        .set("Authorization", `Bearer ${submitterToken}`)
+        .send({ reason: "Trying to reject my own submission." })
+        .expect(403);
+      expect(res.body.error.code).toBe("APPROVER_CANNOT_BE_SUBMITTER");
     });
 
     it("400 ESCALATION_CHECKLIST_INCOMPLETE with the specific failed item keys", async () => {
@@ -720,6 +855,62 @@ describe("Cases module (e2e)", () => {
       expect(doubleApprove.body.error.code).toBe("INVALID_TRANSITION");
     });
 
+    it("submit -> reject -> resubmit -> approve keeps BOTH submission events visible in the timeline throughout (not just the most recent)", async () => {
+      const creatorToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "submission-history-creator");
+      const submitterToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "submission-history-submitter");
+      const { caseId } = await buildEscalatableCase(tenantAId, creatorToken);
+
+      async function submittedEvents(): Promise<{ at: string; actor: string }[]> {
+        const detail = await http().get(`/cases/${caseId}`).set("Authorization", `Bearer ${creatorToken}`).expect(200);
+        return detail.body.data.timeline.filter((e: { type: string }) => e.type === "submitted");
+      }
+
+      // First submission.
+      await http()
+        .patch(`/cases/${caseId}/submit`)
+        .set("Authorization", `Bearer ${submitterToken}`)
+        .send({ escalationRationale: "Initial escalation: confirmed suspicious structuring pattern." })
+        .expect(200);
+      expect(await submittedEvents()).toHaveLength(1);
+
+      // Reject — the live submittedBy/submittedAt/escalationRationale fields are nulled (unchanged
+      // behavior), but the timeline's "submitted" event for this first submission must NOT disappear.
+      await http()
+        .patch(`/cases/${caseId}/reject`)
+        .set("Authorization", `Bearer ${creatorToken}`)
+        .send({ reason: "Needs a second linked transaction reviewed before filing." })
+        .expect(200);
+      const afterReject = await submittedEvents();
+      expect(afterReject).toHaveLength(1);
+
+      // Resubmit, with a genuinely different rationale explaining what changed.
+      await http()
+        .patch(`/cases/${caseId}/submit`)
+        .set("Authorization", `Bearer ${submitterToken}`)
+        .send({ escalationRationale: "Re-escalating: reviewed the second linked transaction, pattern confirmed." })
+        .expect(200);
+      const afterResubmit = await submittedEvents();
+      expect(afterResubmit).toHaveLength(2);
+      // Both events are still present with their own distinct timestamps, oldest first
+      // (the timeline sorts chronologically) — the first submission's entry is untouched by the second.
+      expect(afterResubmit[0].at).toBe(afterReject[0].at);
+      expect(new Date(afterResubmit[1].at).getTime()).toBeGreaterThan(new Date(afterResubmit[0].at).getTime());
+
+      // Approve — the full submission history (both attempts) must still be visible afterward, not
+      // collapsed down to just the one that was ultimately approved.
+      const approveRes = await http().patch(`/cases/${caseId}/approve`).set("Authorization", `Bearer ${creatorToken}`).send({}).expect(200);
+      expect(approveRes.body.data.status).toBe(CaseStatus.SAR_FILED);
+      expect(await submittedEvents()).toHaveLength(2);
+
+      // The durable record, confirmed directly: two case_submission_event rows, distinct rationale text.
+      const submissionRows = await ctx.adminDataSource
+        .getRepository(CaseSubmissionEventEntity)
+        .find({ where: { tenantId: tenantAId, caseId }, order: { at: "ASC" } });
+      expect(submissionRows).toHaveLength(2);
+      expect(submissionRows[0].rationale).toBe("Initial escalation: confirmed suspicious structuring pattern.");
+      expect(submissionRows[1].rationale).toBe("Re-escalating: reviewed the second linked transaction, pattern confirmed.");
+    });
+
     it("400 REJECTION_REASON_REQUIRED for a blank reason", async () => {
       const creatorToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "reject-reason-creator");
       const submitterToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "reject-reason-submitter");
@@ -780,6 +971,20 @@ describe("Cases module (e2e)", () => {
       await http().patch(`/cases/${created.body.data.id}/assign`).set("Authorization", `Bearer ${adminToken}`).send({ assignedTo: null }).expect(200);
       await http().patch(`/cases/${created.body.data.id}/assign`).set("Authorization", `Bearer ${investigatorToken}`).send({ assignedTo: null }).expect(403);
       await http().patch(`/cases/${created.body.data.id}/assign`).set("Authorization", `Bearer ${viewerToken}`).send({ assignedTo: null }).expect(403);
+    });
+
+    it("403 FORBIDDEN_ROLE for SUPER_ADMIN (ASSIGN_ROLES is COMPLIANCE_OFFICER/TENANT_ADMIN only)", async () => {
+      const officerToken = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "assign-super-admin-setup");
+      const superAdminToken = await tokenFor(tenantAId, UserRole.SUPER_ADMIN, "assign-super-admin");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${officerToken}`).send({ customerId: customer.id }).expect(201);
+
+      const res = await http()
+        .patch(`/cases/${created.body.data.id}/assign`)
+        .set("Authorization", `Bearer ${superAdminToken}`)
+        .send({ assignedTo: null })
+        .expect(403);
+      expect(res.body.error.code).toBe("FORBIDDEN_ROLE");
     });
 
     it("400 CASE_ALREADY_TERMINAL on a CLOSED case", async () => {

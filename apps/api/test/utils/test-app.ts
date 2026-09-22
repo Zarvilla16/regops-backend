@@ -20,6 +20,7 @@ import {
   CaseEntity,
   CaseEvidenceEntity,
   CaseNoteEntity,
+  CaseSubmissionEventEntity,
   CustomerAccountEntity,
   CustomerEntity,
   IngestionBatchEntity,
@@ -102,6 +103,7 @@ export async function createTestContext(): Promise<TestContext> {
       CaseNoteEntity,
       CaseEvidenceEntity,
       CaseApprovalEventEntity,
+      CaseSubmissionEventEntity,
       ReportEntity,
     ],
   });

@@ -25,4 +25,5 @@ export * from "./entities/case-assignment-event.entity";
 export * from "./entities/case-note.entity";
 export * from "./entities/case-evidence.entity";
 export * from "./entities/case-approval-event.entity";
+export * from "./entities/case-submission-event.entity";
 export * from "./entities/report.entity";

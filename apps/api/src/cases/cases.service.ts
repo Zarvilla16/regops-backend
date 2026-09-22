@@ -8,6 +8,7 @@ import {
   CaseEntity,
   CaseEvidenceEntity,
   CaseNoteEntity,
+  CaseSubmissionEventEntity,
   CustomerEntity,
   ReportEntity,
   TransactionEntity,
@@ -343,12 +344,21 @@ export class CasesService {
     }
 
     const beforeState = { status: kase.status };
+    const now = new Date();
     await qr.startTransaction();
     try {
       await qr.manager.getRepository(CaseEntity).update(
         { id: caseId },
-        { status: CaseStatus.PENDING_APPROVAL, submittedBy: currentUser.sub, submittedAt: new Date(), escalationRationale: rationale },
+        { status: CaseStatus.PENDING_APPROVAL, submittedBy: currentUser.sub, submittedAt: now, escalationRationale: rationale },
       );
+
+      // Durable, insert-only — never touched by reject() (which nulls the live
+      // submitted_by/submitted_at columns above so a resubmission starts clean).
+      // CaseTimelineService reads this table, not those columns, so a case
+      // submitted, rejected, and resubmitted keeps its full submission history
+      // instead of losing the first submission from the visible record.
+      const submissionRepo = qr.manager.getRepository(CaseSubmissionEventEntity);
+      await submissionRepo.save(submissionRepo.create({ tenantId, caseId, actor: currentUser.sub, rationale, at: now }));
 
       await this.auditService.record(qr, {
         tenantId,

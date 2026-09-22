@@ -27,6 +27,7 @@ import { CaseAssignmentEventEntity } from "./entities/case-assignment-event.enti
 import { CaseNoteEntity } from "./entities/case-note.entity";
 import { CaseEvidenceEntity } from "./entities/case-evidence.entity";
 import { CaseApprovalEventEntity } from "./entities/case-approval-event.entity";
+import { CaseSubmissionEventEntity } from "./entities/case-submission-event.entity";
 import { ReportEntity } from "./entities/report.entity";
 
 dotenv.config();
@@ -58,6 +59,7 @@ export const entities = [
   CaseNoteEntity,
   CaseEvidenceEntity,
   CaseApprovalEventEntity,
+  CaseSubmissionEventEntity,
   ReportEntity,
 ];
 

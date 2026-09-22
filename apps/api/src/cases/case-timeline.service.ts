@@ -1,6 +1,6 @@
 import { forwardRef, Inject, Injectable } from "@nestjs/common";
 import { QueryRunner } from "typeorm";
-import { AlertEntity, CaseApprovalEventEntity, CaseAlertEntity, CaseAssignmentEventEntity, CaseEntity } from "@regops/db";
+import { AlertEntity, CaseApprovalEventEntity, CaseAlertEntity, CaseAssignmentEventEntity, CaseEntity, CaseSubmissionEventEntity } from "@regops/db";
 import { CaseApprovalOutcome, CaseStatus, CaseTimelineEventDto } from "@regops/shared";
 import { CasesService } from "./cases.service";
 
@@ -95,12 +95,19 @@ export class CaseTimelineService {
       });
     }
 
-    // 7. Submitted for approval
-    if (kase.submittedAt && kase.submittedBy) {
+    // 7. Submitted for approval — one per case_submission_event row, a durable
+    // record independent of the live case.submitted_by/submitted_at columns
+    // (which reject() nulls so a resubmission starts clean). A case submitted,
+    // rejected, and resubmitted therefore shows BOTH submissions here, not just
+    // whichever one is currently pending.
+    const submissionEvents = await qr.manager
+      .getRepository(CaseSubmissionEventEntity)
+      .find({ where: { tenantId, caseId: kase.id }, order: { at: "ASC" } });
+    for (const ev of submissionEvents) {
       events.push({
         type: "submitted",
-        at: kase.submittedAt.toISOString(),
-        actor: kase.submittedBy,
+        at: ev.at.toISOString(),
+        actor: ev.actor,
         text: "Submitted this case for SAR-escalation approval.",
       });
     }
