@@ -271,6 +271,16 @@ describe("Cases module (e2e)", () => {
       const tokenViewer = await tokenFor(tenantAId, UserRole.VIEWER, "viewer-read");
       await http().get("/cases").set("Authorization", `Bearer ${tokenViewer}`).expect(200);
     });
+
+    it("a case belonging to another tenant does not appear on GET /cases (list)", async () => {
+      const tokenA = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "list-tenanta-create");
+      const tokenB = await tokenFor(tenantBId, UserRole.COMPLIANCE_OFFICER, "list-tenantb-viewer");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${tokenA}`).send({ customerId: customer.id }).expect(201);
+
+      const res = await http().get("/cases").set("Authorization", `Bearer ${tokenB}`).expect(200);
+      expect(res.body.data.data.some((c: { id: string }) => c.id === created.body.data.id)).toBe(false);
+    });
   });
 
   describe("POST /cases/:id/notes", () => {
@@ -482,6 +492,38 @@ describe("Cases module (e2e)", () => {
         .expect(200);
       expect(Buffer.compare(downloadRes.body, fileContents)).toBe(0);
     });
+
+    it("404 CASE_NOT_FOUND uploading evidence to a case in a different tenant", async () => {
+      const tokenA = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "evidence-upload-tenanta");
+      const tokenB = await tokenFor(tenantBId, UserRole.COMPLIANCE_OFFICER, "evidence-upload-tenantb");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${tokenA}`).send({ customerId: customer.id }).expect(201);
+
+      const res = await http()
+        .post(`/cases/${created.body.data.id}/evidence`)
+        .set("Authorization", `Bearer ${tokenB}`)
+        .attach("file", Buffer.from("%PDF-1.4 cross tenant"), { filename: "x.pdf", contentType: "application/pdf" })
+        .expect(404);
+      expect(res.body.error.code).toBe("CASE_NOT_FOUND");
+    });
+
+    it("404 CASE_NOT_FOUND downloading evidence from a case in a different tenant", async () => {
+      const tokenA = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "evidence-download-tenanta");
+      const tokenB = await tokenFor(tenantBId, UserRole.COMPLIANCE_OFFICER, "evidence-download-tenantb");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${tokenA}`).send({ customerId: customer.id }).expect(201);
+      const uploadRes = await http()
+        .post(`/cases/${created.body.data.id}/evidence`)
+        .set("Authorization", `Bearer ${tokenA}`)
+        .attach("file", Buffer.from("%PDF-1.4 cross tenant download"), { filename: "x.pdf", contentType: "application/pdf" })
+        .expect(201);
+
+      const res = await http()
+        .get(`/cases/${created.body.data.id}/evidence/${uploadRes.body.data.id}`)
+        .set("Authorization", `Bearer ${tokenB}`)
+        .expect(404);
+      expect(res.body.error.code).toBe("CASE_NOT_FOUND");
+    });
   });
 
   describe("GET /cases/:id/checklist", () => {
@@ -561,6 +603,16 @@ describe("Cases module (e2e)", () => {
         const token = await tokenFor(tenantAId, role, `checklist-role-${role.toLowerCase()}`);
         await http().get(`/cases/${created.body.data.id}/checklist`).set("Authorization", `Bearer ${token}`).expect(200);
       }
+    });
+
+    it("404 CASE_NOT_FOUND for a case in a different tenant", async () => {
+      const tokenA = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "checklist-tenanta");
+      const tokenB = await tokenFor(tenantBId, UserRole.COMPLIANCE_OFFICER, "checklist-tenantb");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${tokenA}`).send({ customerId: customer.id }).expect(201);
+
+      const res = await http().get(`/cases/${created.body.data.id}/checklist`).set("Authorization", `Bearer ${tokenB}`).expect(404);
+      expect(res.body.error.code).toBe("CASE_NOT_FOUND");
     });
   });
 
@@ -671,6 +723,21 @@ describe("Cases module (e2e)", () => {
         .send({ alertId: alert.id })
         .expect(403);
       expect(res.body.error.code).toBe("FORBIDDEN_ROLE");
+    });
+
+    it("404 CASE_NOT_FOUND for a case in a different tenant", async () => {
+      const tokenA = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "link-tenanta");
+      const tokenB = await tokenFor(tenantBId, UserRole.COMPLIANCE_OFFICER, "link-tenantb");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${tokenA}`).send({ customerId: customer.id }).expect(201);
+      const alert = await createAlert(tenantAId, customer.id);
+
+      const res = await http()
+        .post(`/cases/${created.body.data.id}/alerts`)
+        .set("Authorization", `Bearer ${tokenB}`)
+        .send({ alertId: alert.id })
+        .expect(404);
+      expect(res.body.error.code).toBe("CASE_NOT_FOUND");
     });
   });
 
@@ -924,6 +991,54 @@ describe("Cases module (e2e)", () => {
       const res = await http().patch(`/cases/${caseId}/reject`).set("Authorization", `Bearer ${creatorToken}`).send({ reason: "  " }).expect(400);
       expect(res.body.error.code).toBe("REJECTION_REASON_REQUIRED");
     });
+
+    it("404 CASE_NOT_FOUND closing a case in a different tenant", async () => {
+      const tokenA = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "close-tenanta");
+      const tokenB = await tokenFor(tenantBId, UserRole.COMPLIANCE_OFFICER, "close-tenantb");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${tokenA}`).send({ customerId: customer.id }).expect(201);
+
+      const res = await http().patch(`/cases/${created.body.data.id}/close`).set("Authorization", `Bearer ${tokenB}`).send({}).expect(404);
+      expect(res.body.error.code).toBe("CASE_NOT_FOUND");
+    });
+
+    it("404 CASE_NOT_FOUND submitting a case in a different tenant", async () => {
+      const tokenA = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "submit-tenanta");
+      const tokenB = await tokenFor(tenantBId, UserRole.COMPLIANCE_OFFICER, "submit-tenantb");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${tokenA}`).send({ customerId: customer.id }).expect(201);
+
+      const res = await http()
+        .patch(`/cases/${created.body.data.id}/submit`)
+        .set("Authorization", `Bearer ${tokenB}`)
+        .send({ escalationRationale: "Escalating." })
+        .expect(404);
+      expect(res.body.error.code).toBe("CASE_NOT_FOUND");
+    });
+
+    it("404 CASE_NOT_FOUND approving a case in a different tenant", async () => {
+      const tokenA = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "approve-tenanta");
+      const tokenB = await tokenFor(tenantBId, UserRole.COMPLIANCE_OFFICER, "approve-tenantb");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${tokenA}`).send({ customerId: customer.id }).expect(201);
+
+      const res = await http().patch(`/cases/${created.body.data.id}/approve`).set("Authorization", `Bearer ${tokenB}`).send({}).expect(404);
+      expect(res.body.error.code).toBe("CASE_NOT_FOUND");
+    });
+
+    it("404 CASE_NOT_FOUND rejecting a case in a different tenant", async () => {
+      const tokenA = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "reject-tenanta");
+      const tokenB = await tokenFor(tenantBId, UserRole.COMPLIANCE_OFFICER, "reject-tenantb");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${tokenA}`).send({ customerId: customer.id }).expect(201);
+
+      const res = await http()
+        .patch(`/cases/${created.body.data.id}/reject`)
+        .set("Authorization", `Bearer ${tokenB}`)
+        .send({ reason: "x" })
+        .expect(404);
+      expect(res.body.error.code).toBe("CASE_NOT_FOUND");
+    });
   });
 
   describe("PATCH /cases/:id/assign", () => {
@@ -999,6 +1114,20 @@ describe("Cases module (e2e)", () => {
         .send({ assignedTo: null })
         .expect(400);
       expect(res.body.error.code).toBe("CASE_ALREADY_TERMINAL");
+    });
+
+    it("404 CASE_NOT_FOUND assigning a case in a different tenant", async () => {
+      const tokenA = await tokenFor(tenantAId, UserRole.COMPLIANCE_OFFICER, "assign-tenanta");
+      const tokenB = await tokenFor(tenantBId, UserRole.COMPLIANCE_OFFICER, "assign-tenantb");
+      const customer = await createCustomer(tenantAId);
+      const created = await http().post("/cases").set("Authorization", `Bearer ${tokenA}`).send({ customerId: customer.id }).expect(201);
+
+      const res = await http()
+        .patch(`/cases/${created.body.data.id}/assign`)
+        .set("Authorization", `Bearer ${tokenB}`)
+        .send({ assignedTo: null })
+        .expect(404);
+      expect(res.body.error.code).toBe("CASE_NOT_FOUND");
     });
   });
 
