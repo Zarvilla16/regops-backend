@@ -1830,9 +1830,27 @@ whole-branch review's own fixes had already landed:
 - **No service-level unit tests for `CasesService`/`CaseNotesService`/`CaseEvidenceService`/
   `CaseTimelineService`.** Same standing gap as every prior prompt (Prompt 1's Known Issues first
   flagged this) — all coverage is e2e-only, against a real Postgres.
-- **Swagger coverage is `@ApiTags`/`@ApiBearerAuth` only**, no per-DTO `@ApiProperty()` richness in
-  the generated schema — the CLI plugin that would make decorators unnecessary was never enabled
-  (flagged repeatedly since Prompt 1; not something this prompt was asked to fix).
+- ~~Swagger coverage is `@ApiTags`/`@ApiBearerAuth` only, no per-DTO `@ApiProperty()` richness in
+  the generated schema — the CLI plugin that would make decorators unnecessary was never enabled~~ —
+  **resolved in a follow-up session**: `"plugins": ["@nestjs/swagger"]` added to
+  `apps/api/nest-cli.json`'s `compilerOptions`. Verified live against a `rm -rf dist
+  tsconfig.tsbuildinfo && npx nest build` + `node dist/main.js` instance — `/docs-json` now shows real
+  typed fields (including enums, `minLength`/`maxLength`, `format: email`, nested `$ref`s) for DTOs
+  that previously rendered as empty `{"type": "object", "properties": {}}`, across customers, cases,
+  and screening (`CreateCustomerDto`, `CreateCaseDto`, `SubmitCaseDto`, `ManualScreenDto`,
+  `ReviewMatchDto`, `ConfigureProvidersDto` all confirmed populated). Full `pnpm test` (75 tests) and
+  `pnpm test:e2e` (176 tests) still pass unchanged — the plugin only affects compile-time schema
+  generation, not `class-validator`/`class-transformer` runtime behavior. **New, narrower limitation
+  left behind by this fix**: the plugin only runs through Nest's own compiler (`nest build`/`nest
+  start`). `apps/api`'s `pnpm dev` script invokes `tsc-watch` (plain `tsc --watch`), which bypasses
+  Nest's compiler entirely, so **schemas will still render empty under `pnpm dev`** — only a `nest
+  build`-produced `dist/` (e.g. via `pnpm build` or `pnpm start`) reflects the fix. Switching `dev` to
+  `nest start --watch` would close this too, but that changes the hot-reload workflow and was
+  deliberately left as a separate follow-up, not bundled into this fix. The unrelated query-parameter
+  gaps (`GET /customers`, `GET /screening/checks`, `GET /screening/matches`, `GET
+  /customers/export`, etc.) and the file-upload gap (`POST /customers/:id/photo`) are a different
+  cause (missing explicit `@ApiQuery()`/`@ApiConsumes()` decorators, which the CLI plugin doesn't
+  infer) and are still open.
 - **The `case_number`/alert-linking race windows described in Deviations #4 are real, if narrow** —
   disclosed rather than silently accepted.
 - **`GET /cases/:id/checklist` and `GET /cases/:id`'s embedded `checklist` field call the exact same
