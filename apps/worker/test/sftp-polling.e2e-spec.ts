@@ -43,7 +43,7 @@ describe("SFTP-emulated inbox polling (e2e)", () => {
     storageDir = fs.mkdtempSync(path.join(os.tmpdir(), "regops-sftp-poll-test-"));
     storage = new LocalFileStorage(storageDir);
 
-    const connection = parseRedisUrl(process.env.REDIS_URL ?? "redis://localhost:6379");
+    const connection = parseRedisUrl(process.env.REDIS_URL ?? "redis://127.0.0.1:6379");
     queue = new Queue(queueName, { connection });
     queueEvents = new QueueEvents(queueName, { connection });
     worker = new Worker(

@@ -1,5 +1,6 @@
 import "reflect-metadata";
 import * as dotenv from "dotenv";
+import * as path from "path";
 import { DataSource, DataSourceOptions } from "typeorm";
 import { TenantEntity } from "./entities/tenant.entity";
 import { UserEntity } from "./entities/user.entity";
@@ -30,7 +31,11 @@ import { CaseApprovalEventEntity } from "./entities/case-approval-event.entity";
 import { CaseSubmissionEventEntity } from "./entities/case-submission-event.entity";
 import { ReportEntity } from "./entities/report.entity";
 
+// cwd first (apps that run from their own directory), then the repo-root .env: `pnpm db:migrate` runs with
+// cwd = packages/db, which has no .env, so without the second call DATABASE_ADMIN_URL was never set and the
+// fallback below was silently used. dotenv never overrides an already-set variable. Same depth from src/ and dist/.
 dotenv.config();
+dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
 
 export const entities = [
   TenantEntity,
@@ -70,7 +75,7 @@ export const entities = [
  */
 const adminUrl =
   process.env.DATABASE_ADMIN_URL ??
-  "postgres://regops_admin:regops_admin_password@localhost:5433/regops";
+  "postgres://regops_admin:regops_admin_password@127.0.0.1:5433/regops";
 
 export const dataSourceOptions: DataSourceOptions = {
   type: "postgres",

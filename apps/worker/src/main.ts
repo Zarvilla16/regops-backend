@@ -33,7 +33,7 @@ import { evaluateTransaction } from "./rules/evaluate-rules.processor";
 
 dotenv.config();
 
-const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
+const REDIS_URL = process.env.REDIS_URL ?? "redis://127.0.0.1:6379";
 const PORT = Number(process.env.PORT ?? 4001);
 // Both apps/api (producer, uploads here) and apps/worker (consumer, reads/writes here) must
 // resolve to the same physical directory — see LocalFileStorage's docblock for why this is a

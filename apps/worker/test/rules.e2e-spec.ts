@@ -65,7 +65,7 @@ describe("Rules worker processor (e2e)", () => {
     // Borrows a BullMQ connection for the counterparty-screening cache
     // rather than opening a second ioredis client — same rationale as
     // evaluate-rules.processor.ts's own use of the real Worker's `.client`.
-    const connection = parseRedisUrl(process.env.REDIS_URL ?? "redis://localhost:6379");
+    const connection = parseRedisUrl(process.env.REDIS_URL ?? "redis://127.0.0.1:6379");
     bootstrapQueue = new Queue(RULE_EVALUATION_QUEUE, { connection });
     redisClient = await bootstrapQueue.client;
 

@@ -45,7 +45,7 @@ export class RuleEvaluationQueueService implements OnModuleDestroy {
     private readonly configService: ConfigService,
     private readonly eventEmitter: EventEmitter2,
   ) {
-    const redisUrl = this.configService.get<string>("redis.url") ?? "redis://localhost:6379";
+    const redisUrl = this.configService.get<string>("redis.url") ?? "redis://127.0.0.1:6379";
     const connection = parseRedisUrl(redisUrl);
     this.queue = new Queue(RULE_EVALUATION_QUEUE, { connection });
 
