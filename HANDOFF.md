@@ -1960,3 +1960,179 @@ suite, so bug #26's fix is verified by direct code inspection, not a test that a
 requests; and the frontend not yet reconciled against this real backend. With this work, all 12 tasks
 of the Case Management module plan, the whole-branch review and its fix round, the role-gate coverage
 follow-up, the Swagger test guide, and the submission-history durability fix, are complete.
+
+---
+
+**Update — Backend Prompt 7 (Reports module: SAR & CTR) is now complete.** Built on Prompts 1–6 with no schema changes to
+`Customer`/`Case`/`Transaction`/`Alert`. It extends the Prompt 6 `report` stub into the real SAR/CTR table. **Read the
+"NOT goAML-valid" item at the top of this prompt's Known Issues before treating any of this as filing-ready — it is a hard
+blocker for real NFIU filing.**
+
+### Backend Prompt 7 (Reports module) adds
+
+- **Migration `1700000062000-Reports.ts`** (forward-only follow-up to Prompt 6's `1700000060000`/`1700000061000`; the original
+  Report migration is untouched). `case_id` and `generated_by` become nullable (the two NOT NULL → nullable changes);
+  new columns `transaction_id`, `flagged_amount numeric(20,2)`, `narrative`, `submitted_by/at`, `confirmed_by/at`,
+  `nfiu_reference`; `report_type_enum` gains `CTR`, `report_status_enum` gains `PENDING_CONFIRMATION`/`SUBMITTED`;
+  `uq_report_case_id` is now partial (`WHERE case_id IS NOT NULL`), new partial `uq_report_transaction_id`, and
+  `ck_report_subject` enforces exactly-one-of `case_id`/`transaction_id` **and** that it matches `report_type`
+  (SAR ⇒ case, CTR ⇒ transaction). RLS was already enabled on `report` by Prompt 6 — nothing to add.
+- **`apps/api/src/reports`**: `ReportsService` (one service, branches on `reportType` only for generation and confirmation
+  rigor), `ReportExportService` (XML/PDF/CSV), `ReportsController` (9 endpoints: list, detail, edit, submit, confirm, reject,
+  xml, pdf, csv), `CtrGenerationListener` (`@OnEvent("transaction.ingested")`), `report-drafting.ts` (pure helpers for the
+  auto-drafted `flaggedAmount`/`narrative`), DTOs.
+- **SAR generation** stays at its existing call site, `CasesService.approve()`, inside the approval transaction — the stub row is now
+  fully populated: `flaggedAmount` = sum of `getDerivedTransactions()` (the same derivation `toDetail()` uses, already
+  deduplicated), summed in integer kobo; `narrative` = investigation notes (chronological, author-named) + escalation
+  rationale. `generatedBy` = the approving officer. An audit row `report.generated` is written.
+- **CTR generation** is automatic off `transaction.ingested`. Qualification is **not** re-implemented: the listener calls
+  `evaluateLargeCash()` from `@regops/rules-engine` (the exact function the rule worker uses) with the tenant's own `LARGE_CASH`
+  rule config; the threshold that applied comes back in the evaluator's own evidence (`facts.thresholdApplied`) and is quoted
+  in the CTR narrative. Idempotent via `INSERT … ON CONFLICT DO NOTHING` against `uq_report_transaction_id`.
+- **Lifecycle**: SAR `DRAFT → PENDING_CONFIRMATION → SUBMITTED` (submitter ≠ confirmer/rejecter, reject clears
+  `submittedBy/At`); CTR one officer confirms `DRAFT → SUBMITTED`. Every transition is a conditional
+  `UPDATE … WHERE status = <expected>`, so two officers racing cannot both win. `SUBMITTED` is terminal for every role.
+- **Audit actions added**: `report.generated`, `report.edited`, `report.submitted`, `report.confirmed`, `report.rejected`,
+  `report.exported`, plus `customer.pii.view` (same action name as `GET /customers/:id/pii`) whenever XML with unmasked BVN/NIN is produced.
+- New dependency: `pdfkit` (+ `@types/pdfkit`) in `apps/api`.
+- `@regops/shared`: `ReportType` gains `CTR`; `ReportStatus` gains `PENDING_CONFIRMATION`/`SUBMITTED`; `ReportDto` extended
+  (`caseId`/`generatedBy` now nullable — a breaking shape change vs. Prompt 6's stub); new `ReportDetailDto` etc.
+
+### Critical bugs found while building the Reports module (fixed)
+
+28. **The CTR listener matched an arbitrary transaction when an event lacked `transactionId`, and opened a DB transaction for every
+    ingested event (found by an existing test, not by the new suite).** After the first complete implementation, the full
+    `apps/api` e2e run failed `transactions.e2e-spec.ts › 100 transaction.ingested events … trigger exactly one re-score`
+    (reproduced twice in isolation, so not a flake). Two root causes in `CtrGenerationListener`: (a) that test emits
+    malformed events (`{ tenantId, customerId }`, no `transactionId`); `findOne({ where: { id: undefined, tenantId } })` — TypeORM
+    silently **drops** an `undefined` where-value — would have matched *some* transaction of the tenant and generated a CTR
+    for it if it happened to be qualifying cash; (b) the listener opened a query runner + transaction per event, including every
+    non-cash event, so 100 events starved the connection pool inside the risk listener's 500 ms window (the actual reason that test
+    failed). Fix: a guard on missing `transactionId`/`tenantId`, plus a zero-DB pre-filter (`couldEverQualify`) that asks
+    `evaluateLargeCash` itself whether the event's channel/currency/type could *ever* qualify (thresholds of 0, unbounded
+    amount) — so non-cash events never touch the DB, and the gating still comes from the evaluator rather than a second copy
+    of its logic. Regression test added (`a malformed event (no transactionId) is ignored`) and **verified to fail with the guard
+    removed** (it does), then pass with it restored; the full suite re-run green.
+29. **The naira sign rendered as "¦" in the PDF export (found by opening a generated PDF, not by any assertion).** The e2e PDF test
+    only asserts `%PDF-`/`%%EOF`/size, which passes for a garbled document. pdfkit's built-in Helvetica is WinAnsi-only, so `₦`
+    (used in every CTR narrative) came out as `¦`, and Yoruba/Igbo diacritics in customer names (e.g. Ọ, Ṣ) would have garbled the
+    same way. Fix: `pdfSafe()` transliterates before rendering (`₦` → `NGN `, unrenderable letters → base letter, anything else → `?`);
+    unit-tested, and the regenerated CTR PDF was opened and read to confirm. XML/CSV keep full Unicode. Bundling a Unicode font
+    was judged out of scope — see Known Issues.
+
+Two non-product problems worth recording so the next session doesn't lose time: (i) on this machine `localhost` resolves to `::1`,
+where a `wslrelay` process listens on 5433 and resets connections while Docker's postgres/redis answer on IPv4 — every DB/Redis
+connection to `localhost` failed with `ECONNRESET` until `DATABASE_URL`/`DATABASE_ADMIN_URL`/`REDIS_URL` were overridden to
+`127.0.0.1` **in the shell only** (the checked-in/local `.env` files were not changed); (ii) test-suite mistakes fixed along the way:
+hardcoded BVNs collide on `uq_customer_tenant_bvn` because the dev DB persists across runs (now randomised), and supertest requests
+built eagerly then awaited one-by-one hit a closed ephemeral listener (now built lazily).
+
+### Deviations from the Backend Prompt 7 spec (and why)
+
+1. **CTR `reject` is valid from `DRAFT` and does not change status.** §3.6 says CTR confirmation is a single act, and §2.6/§3.6
+   also want a reject that "returns it to DRAFT" — but if confirm is atomic there is never a persisted `PENDING_CONFIRMATION`
+   to reject *from*. Chosen reading: the confirming officer's "rejection" is a recorded review finding (reason required, audit-logged
+   as `report.rejected`) on a report that stays an editable `DRAFT`. The externally observable contract in the spec's test list
+   holds (reject → still `DRAFT`, editable, re-confirmable), but there is no state *transition* on a CTR reject.
+2. **CTR confirm is one atomic `DRAFT → SUBMITTED` update** (the "acceptable implementation choice" in §3.6). `submittedBy`/
+   `submittedAt` stay null for a CTR; `confirmedAt` is its filing time.
+3. **The rejection reason is stored in the audit log only.** §6's schema has no column for it (same for SAR and CTR); adding one
+   was not requested.
+4. **SAR row creation stays in `CasesService.approve()` rather than moving into `ReportsService`.** `ReportsModule` imports
+   `CasesModule` (for `getDerivedTransactions`/customer summary); making `CasesModule` import `ReportsModule` back would be a
+   circular module dependency. The computation is shared through pure functions in `reports/report-drafting.ts` instead.
+5. **The CTR listener honours the tenant's `LARGE_CASH` config even if that rule is deactivated**, and falls back to
+   `DEFAULT_RULE_CONFIGS` if the tenant has no such row. A CTR is a mandatory filing; `isActive` only governs alerting. Because
+   qualification *is* the alert evaluator, its exclusions also apply: non-NGN cash, `excludedChannels`,
+   `applyToCredit`/`applyToDebit = false`, and PEP customers using the individual threshold. §2.2 asked for reuse where clean; this is that
+   reuse, so no second threshold copy exists to drift.
+5a. **A zero-DB pre-filter was added to the listener** (bug #28) — a strict superset of the real check, sourced from the evaluator.
+6. **Empty `PATCH /reports/:id` body → `400 NO_EDITABLE_FIELDS`** (a new code, not in the spec's error lists), and any field other
+   than `narrative`/`flaggedAmount` → `400` from the global `forbidNonWhitelisted` pipe.
+7. **`:id` routes use `ParseUUIDPipe`** → a malformed id is `400`, not a Postgres cast error surfaced as `500`. No other module does this.
+8. **Downloads commit the request transaction before writing the response** (`@Res()` owns the response, so
+   `TransactionInterceptor` would otherwise commit after the client already has the body — the class of race in bug #23), so the
+   `report.exported`/`customer.pii.view` audit rows are durable by the time the client sees the file.
+9. **The XML carries an explicit "not goAML-conformant" comment** and per-section comments naming what is not captured. Spec §2.4
+   forbids *claiming* validity; it does not forbid disclaiming, and a downloaded file is the place a consumer would otherwise assume.
+10. `flagged_amount` is `numeric(20,2)` in the DB and returned as a JS `number` by the API (the spec's PATCH body takes a `number`).
+11. Report reference in the XML is the report's UUID — the mock's human-readable `SAR-2026-000001` sequence was not carried over (no sequence was specified).
+12. **Frontend mock statuses do not map 1:1 to the backend enum.** The mock has `GENERATED` and `ACKNOWLEDGED`; the backend (per §3.1) has
+    only `DRAFT | PENDING_CONFIRMATION | SUBMITTED`. The frontend was not touched (out of scope) and will need a mapping when it is re-pointed.
+
+13. **`GET /reports/:id/xml` is role-gated (`SUPER_ADMIN`/`TENANT_ADMIN`/`COMPLIANCE_OFFICER`) and requires a `reason` query param, unlike §3.7's "any authenticated tenant user".** It matches `GET /customers/:id/pii` exactly: param `reason`, missing/empty → `400 REASON_REQUIRED` ("A 'reason' query param is required.", checked after the role gate, before any data is read), and the reason is written into the `customer.pii.view` audit row's `afterState` (with the report id and fields) and into `report.exported`'s.
+    §3.7's open-download convention conflicts with §2.4's requirement that the XML carry unmasked BVN/NIN; the spec author confirmed the
+    original wording was a gap and directed the same gate as `GET /customers/:id/pii`. PDF/CSV remain open (masked BVN/NIN only). See the
+    resolved Known Issue below.
+
+### Known issues / incomplete items (Backend Prompt 7)
+
+- **HARD BLOCKER for any real NFIU filing: the XML is NOT goAML-schema-valid and must not be submitted as-is.** This is a real,
+  unresolved gap, not a cosmetic one. Specifically, none of the following exists:
+  1. **NFIU's goAML XSD is neither implemented nor validated against.** The element names/structure here are this project's own;
+     there is no schema, no validator, and no test that would notice divergence from the real one. A goAML submission built from
+     this output will be rejected by the NFIU portal.
+  2. **Reporting-institution identifiers are not populated beyond what `Tenant` already has** — name, institution type, and
+     `cbn_license_number` (emitted only if set). goAML's institution/registration block needs more; no new tenant fields were invented.
+  3. **Reporting-officer details are name + email only** (from `User`). Whatever regulatory-facing identity goAML requires of the
+     reporting/submitting officer is not captured.
+  4. **No structured typology/indicator codes.** The "why is this suspicious" classification goAML expects is absent; the narrative
+     is free text (auto-drafted from case notes and the escalation rationale).
+  5. **Customer address is not in the XML** because `Customer` has no address column at all (the spec said "if captured").
+- ~~A VIEWER (and every other authenticated role) can download XML containing unmasked BVN/NIN~~ — **resolved after review**: the spec's
+  "no role restriction on download" convention was a gap in the original spec, not a requirement to preserve. `GET /reports/:id/xml` is now
+  gated to `SUPER_ADMIN`/`TENANT_ADMIN`/`COMPLIANCE_OFFICER`, the same set as `GET /customers/:id/pii`. Tested: `INVESTIGATOR`/`VIEWER` get
+  `403 FORBIDDEN_ROLE`, no unmasked value appears in the response, and neither `report.exported` nor `customer.pii.view` is written for a
+  refused request; the three allowed roles get the XML and each writes one `customer.pii.view`. PDF and CSV stay open to all authenticated
+  roles — confirmed they contain no unmasked PII: both use the masked form of BVN/NIN (CSV asserted for all five roles to contain neither
+  raw BVN nor NIN; PDF confirmed by code — its only BVN/NIN output goes through `maskId` — and by reading a generated PDF). They do contain
+  the customer's name, CBS id, account numbers and the narrative, the same data the case/report detail endpoints already show every role.
+  The XML route also requires the `reason` query param exactly like the customer PII route (added after review, see Deviation #13); PDF/CSV need none.
+- **No correction/amendment workflow for a `SUBMITTED` report** (out of scope per §5). A wrong filing cannot be fixed inside this record.
+- **CTR generation has no reconciliation.** `transaction.ingested` is raised in the API process by the ingestion queue's `QueueEvents`
+  bridge; if the API is down when it fires (or the listener errors — it logs, it does not retry), that transaction never gets a CTR and
+  nothing later notices. The ingested transaction rows remain, so a backfill query is straightforward, but none was built (§5).
+- **Foreign-currency cash never produces a CTR** (inherited from `evaluateLargeCash`, which is NGN-only in v1) — flag if regulation requires otherwise.
+- **PDF is an internal-recordkeeping view with lossy text**: `pdfSafe()` transliterates characters Helvetica cannot draw (bug #29).
+  Customer names with non-Latin-1 letters lose their diacritics in the PDF only.
+- **The PDF/CSV exports still show BVN/NIN masked, but `report.exported` is audit-logged for all three formats**; only XML additionally logs the PII reveal.
+- **No test races two concurrent submit/confirm/reject requests.** The conditional-`UPDATE … WHERE status` design is verified by
+  code inspection and the sequential state-machine tests; only CTR *generation* idempotency has a concurrent test (two parallel emits).
+- **No hand-walked Swagger test guide** (`docs/testing/prompt-7-…`) was written for this prompt — Prompts 2–6 each have one; §9 of this
+  prompt did not ask for it.
+- **PDF content is verified structurally by the e2e suite and visually (once, by hand, for one SAR and one CTR) — not by an automated text assertion.**
+- **Reports' controller imports `ANY_AUTHENTICATED`/`COMPLIANCE_OFFICER_ONLY`/`requestMeta` from `cases.controller.ts`** — a small
+  controller-to-controller coupling that mirrors how the role constants were already shared, but is not ideal; extracting them is a follow-up.
+- Standing gap, same as every prior prompt: no per-service unit tests for `ReportsService`/`ReportExportService`/`CtrGenerationListener`
+  (all covered by e2e against real Postgres; only the pure helpers `report-drafting.ts`/`pdfSafe` have unit tests, 8).
+- The frontend was not reconciled against this backend (out of scope by design).
+- Fixed in passing: three pre-existing unused-import warnings in `cases.service.spec.ts`/`screening.service.spec.ts` that made
+  `pnpm lint` (`--max-warnings=0`) fail on `master` before this work started.
+
+### Definition of Done — Backend Prompt 7 — verified vs. not verified
+
+| # | Item | Status |
+|---|---|---|
+| 1 | Forward-only migration extends `report` (2 columns nullable, 8 new columns, enum values, partial unique indexes, exactly-one-subject check); original Prompt 6 migration untouched | ✅ Verified — `1700000062000-Reports.ts` applied, reverted, and re-applied against the live dev Postgres; `\d report` shows all columns, `uq_report_case_id` and `uq_report_transaction_id` as partial indexes, `ck_report_subject`, and RLS policies intact. Down-migration deletes CTR rows and leaves the added enum values in place (Postgres cannot drop them) |
+| 2 | One entity, exactly one of `case_id`/`transaction_id`, matching `report_type` | ✅ Verified — e2e `the DB itself rejects…` inserts a duplicate CTR, duplicate SAR, both-set, neither-set and type/subject-mismatch rows directly and each is refused by the named constraint. Application write paths (`approve()`, `generateCtr()`) hardcode the pairing; no endpoint accepts either id from a caller |
+| 3 | SAR generation on approve: exactly one populated row, dedup'd `flaggedAmount`, narrative from notes + rationale, `generatedBy` = approver | ✅ Verified — `SAR generation` block (4 tests): shared transaction counted once (3500.30, not the naive 5500.50), notes chronological before the rationale, null amount when no linked transactions, audit row |
+| 4 | CTR auto-generation: qualifies → one draft; non-qualifying → none; threshold read from the tenant's rule config (not hardcoded); qualification reuses the Large Cash evaluator | ✅ Verified — the `CTR auto-generation` block (9 tests): exactly-at vs. just-below threshold, non-CASH / USD / corporate-under-threshold produce none, a tenant with a 1,000 threshold override (rule deactivated) qualifies a 2,500 cash txn, default fallback with no rule row, `generatedBy` null. Reuse is by direct call to `evaluateLargeCash` (documented in the listener), not a parallel implementation |
+| 5 | CTR idempotency | ✅ Verified — same event fired twice sequentially **and** twice concurrently ⇒ exactly one row and one `report.generated` audit row; the DB unique index directly rejects a second insert |
+| 6 | Editing: `DRAFT` only; only `narrative`/`flaggedAmount`; 409 `REPORT_NOT_EDITABLE` otherwise | ✅ Verified — `PATCH /reports/:id` block (3 tests), SAR and CTR; extra fields/negative/3-decimal amount/empty body all 400; 409 on `PENDING_CONFIRMATION` and `SUBMITTED` with the row asserted unchanged |
+| 7 | SAR maker-checker: submit → submitter can't confirm/reject (403) → different officer confirms; reject clears fields, editable, genuine resubmit required; NFIU ref / reason required | ✅ Verified — `SAR two-person maker-checker` block (4 tests) incl. the full submit → reject → edit → resubmit-by-other → original-submitter confirms cycle, and no silent resume. Guard removal was mutation-tested (test fails without it) |
+| 8 | CTR single-confirmer: confirm from `DRAFT` with no submitter/guard; reject → editable `DRAFT` → re-confirmable; `WRONG_REPORT_TYPE` on submit | ✅ Verified — `CTR single-confirmer flow` block (3 tests) + the `WRONG_REPORT_TYPE` test. **See Deviation #1: a CTR reject changes no status** |
+| 9 | Immutability after `SUBMITTED` | ✅ Verified — for both a SAR and a CTR, all five roles × edit/submit/confirm/reject: Compliance Officer gets 409/400 at the state check, every other role 403 at the role gate, and the row is compared byte-for-byte before/after |
+| 10 | XML contains real transaction/customer/amount/rationale data and never claims schema validity | ✅ Verified — asserts on real fields: unmasked BVN/NIN, DOB, nationality, occupation, tenant name + license number, `flagged_amount`, case number + escalation rationale, all 3 SAR transactions once each, XML-special characters escaped, CTR's single transaction with account/channel/date. Asserts the disclaimer is present and that no schema/`xmlns`/`validated` claim appears in body or headers. **This proves what the XML contains and disclaims, not that it is valid — it is not: see the Known Issues blocker** |
+| 11 | XML BVN/NIN unmask is role-gated, reason-required and audit-logged like the PII-reveal endpoint | ✅ Verified — the `reason` is asserted present in both audit rows, and a missing/empty reason is a 400 with nothing exported; `report.exported` for xml and csv, and exactly one `customer.pii.view` (XML only) with actor, report id and fields |
+| 12 | PDF and CSV exports | ⚠️ Partial — CSV asserted on content (fields, per-transaction rows, masked BVN/NIN, formula-injection neutralised, quoting). PDF asserted as a structurally valid document only; its readable content was checked by opening a generated SAR and CTR PDF by hand (which is how bug #29 was found), not by an automated text assertion |
+| 13 | List and detail: filters, pagination, linked case/transaction summary | ✅ Verified — status/type/date-range filters, page/limit/meta, invalid enum → 400, tenant isolation of the list; detail returns the case summary for a SAR and the transaction summary for a CTR |
+| 14 | Tenant isolation: cross-tenant 404 on every endpoint | ✅ Verified — tenant B's Compliance Officer gets 404 (never 403) on all 8 `:id` endpoints for both a SAR and a CTR with the row unchanged, `GET /reports` never leaks them, and a raw `regops_app` connection with no tenant context sees zero `report` rows (RLS at the DB level) |
+| 15 | Role gates: every endpoint × every role, `SUPER_ADMIN` explicit | ✅ Verified — all five roles get 200 on list/detail/pdf/csv; **xml is 200 for `SUPER_ADMIN`/`TENANT_ADMIN`/`COMPLIANCE_OFFICER` and 403 `FORBIDDEN_ROLE` for `INVESTIGATOR`/`VIEWER`** (see Deviation #13); `SUPER_ADMIN`, `TENANT_ADMIN`, `INVESTIGATOR`, `VIEWER` each get 403 `FORBIDDEN_ROLE` on edit/submit/confirm/reject for both report types with the row unchanged; Compliance Officer succeeds throughout the flow tests; unauthenticated → 401 |
+| 16 | `pnpm lint && pnpm typecheck && pnpm test && pnpm test:e2e` all pass | ✅ Verified — final full run after the last code change: **lint** 15/15 tasks green (this includes fixing three pre-existing unused-import warnings on `master`, see Known Issues); **typecheck** 15/15 green (includes `apps/web`, so the shared enum/DTO changes did not break the frontend build); **test** (unit) 12/12 tasks green — `apps/api` 153/153 (up from 145: +8 for `report-drafting`/`pdfSafe`), `apps/worker` 10/10, `risk-engine` 64/64, `rules-engine` 41/41, `screening-engine` 40/40; **test:e2e** `apps/api` **215/215** across 11 suites (`reports.e2e-spec.ts` is 39 of them; the other 176 are Prompts 1–6, unchanged and still green), `apps/worker` **37/37** across 6 non-benchmark suites (2 skipped, as before). Run against the live dev Postgres/Redis (with the 127.0.0.1 override described above) |
+| 17 | §2.4's XML-schema-validity gap documented as a hard blocker | ✅ Verified — first item of this prompt's Known Issues, listing all four required sub-gaps (XSD, institution identifiers, officer details, typology codes) plus the missing address, stated as a hard blocker for any real NFIU filing |
+| 18 | Hand-walked manual test guide against a live server | ❌ Not done — not requested by this prompt (see Known Issues) |
+
+**Bottom line**: every behaviour this module claims is proven against a real Postgres, and two real defects were found by *looking
+rather than asserting* (bug #28 by an existing test failing after a new listener was added; bug #29 by opening a generated PDF). What
+this prompt does **not** deliver is a filing-ready NFIU document: the XML is richer than the frontend mock's placeholder but is not
+goAML-schema-valid, and that is a hard blocker, not a polish item.

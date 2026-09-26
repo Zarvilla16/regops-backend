@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, ForbiddenException } from "@nestjs/common";
 import { QueryRunner } from "typeorm";
-import { AlertEntity, CaseAlertEntity, CaseApprovalEventEntity, CaseEntity, CaseNoteEntity, CustomerEntity, TransactionEntity } from "@regops/db";
+import { AlertEntity, CaseApprovalEventEntity, CaseEntity, CustomerEntity, TransactionEntity } from "@regops/db";
 import {
   AlertStatus,
   AuthUserContext,

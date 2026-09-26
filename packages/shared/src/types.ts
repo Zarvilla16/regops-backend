@@ -501,17 +501,52 @@ export interface CaseListItemDto {
   createdAt: string;
 }
 
-/** Minimal seed row — Backend Prompt 7 will extend this substantially (narrative, flagged amount,
- * submission fields, XML content). See this prompt's HANDOFF.md section for the explicit handoff note. */
 export interface ReportDto {
   id: string;
   tenantId: string;
-  caseId: string;
+  /** Set iff reportType = SAR. */
+  caseId: string | null;
+  /** Set iff reportType = CTR. */
+  transactionId: string | null;
   customerId: string;
   reportType: ReportType;
   status: ReportStatus;
+  flaggedAmount: number | null;
+  narrative: string | null;
   generatedAt: string;
-  generatedBy: string;
+  /** null = system-generated (every CTR). */
+  generatedBy: string | null;
+  submittedBy: string | null;
+  submittedAt: string | null;
+  confirmedBy: string | null;
+  confirmedAt: string | null;
+  nfiuReference: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ReportCaseSummaryDto {
+  id: string;
+  caseNumber: string;
+  status: CaseStatus;
+  escalationRationale: string | null;
+}
+
+export interface ReportTransactionSummaryDto {
+  id: string;
+  cbsTransactionId: string;
+  accountNumber: string;
+  amount: string;
+  currency: string;
+  channel: TransactionChannel;
+  type: TransactionType;
+  occurredAt: string;
+}
+
+export interface ReportDetailDto extends ReportDto {
+  customer: CaseCustomerSummaryDto | null;
+  /** Populated for SAR only. */
+  case: ReportCaseSummaryDto | null;
+  /** Populated for CTR only. */
+  transaction: ReportTransactionSummaryDto | null;
 }

@@ -12,6 +12,7 @@ import {
   CustomerEntity,
   ReportEntity,
   TransactionEntity,
+  UserEntity,
 } from "@regops/db";
 import {
   AlertSeverity,
@@ -36,6 +37,7 @@ import {
 import { AuditService } from "../audit/audit.service";
 import { RequestMeta } from "../users/users.service";
 import { CaseTimelineService } from "./case-timeline.service";
+import { buildSarNarrative, computeSarFlaggedAmount } from "../reports/report-drafting";
 import { CreateCaseDto } from "./dto/create-case.dto";
 
 export interface CaseFilters {
@@ -408,18 +410,45 @@ export class CasesService {
         approvalRepo.create({ tenantId, caseId, outcome: CaseApprovalOutcome.APPROVED, actor: currentUser.sub, reason: null, at: now }),
       );
 
+      // Backend Prompt 7, Section 3.2/2.5: the draft SAR is fully populated at generation —
+      // flaggedAmount from the case's derived (deduplicated) transactions, narrative from its notes + escalation rationale.
+      const derivedTransactions = await this.getDerivedTransactions(qr, tenantId, caseId);
+      const notes = await this.listNotes(qr, tenantId, caseId);
+      const authorIds = [...new Set(notes.map((n) => n.userId))];
+      const authors = authorIds.length
+        ? await qr.manager.getRepository(UserEntity).createQueryBuilder("u").where("u.tenant_id = :tenantId", { tenantId }).andWhere("u.id IN (:...authorIds)", { authorIds }).getMany()
+        : [];
+      const authorName = new Map(authors.map((u) => [u.id, u.fullName]));
+
       const reportRepo = qr.manager.getRepository(ReportEntity);
-      await reportRepo.save(
+      const report = await reportRepo.save(
         reportRepo.create({
           tenantId,
           caseId,
+          transactionId: null,
           customerId: kase.customerId,
           reportType: ReportType.SAR,
           status: ReportStatus.DRAFT,
+          flaggedAmount: computeSarFlaggedAmount(derivedTransactions),
+          narrative: buildSarNarrative({
+            caseNumber: kase.caseNumber,
+            notes: notes.map((n) => ({ at: new Date(n.createdAt), authorName: authorName.get(n.userId) ?? n.userId, content: n.content })),
+            escalationRationale: kase.escalationRationale,
+          }),
           generatedAt: now,
           generatedBy: currentUser.sub,
         }),
       );
+      await this.auditService.record(qr, {
+        tenantId,
+        userId: currentUser.sub,
+        action: "report.generated",
+        entityType: "report",
+        entityId: report.id,
+        afterState: { reportType: ReportType.SAR, caseId, status: ReportStatus.DRAFT },
+        ipAddress: meta.ipAddress,
+        userAgent: meta.userAgent,
+      });
 
       await this.auditService.record(qr, {
         tenantId,

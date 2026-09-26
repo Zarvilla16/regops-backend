@@ -24,6 +24,7 @@ import { ScreeningModule } from "./screening/screening.module";
 import { TransactionsModule } from "./transactions/transactions.module";
 import { RulesModule } from "./rules/rules.module";
 import { CasesModule } from "./cases/cases.module";
+import { ReportsModule } from "./reports/reports.module";
 
 @Module({
   imports: [
@@ -58,6 +59,7 @@ import { CasesModule } from "./cases/cases.module";
     TransactionsModule,
     RulesModule,
     CasesModule,
+    ReportsModule,
   ],
   providers: [
     TenantContextMiddleware,

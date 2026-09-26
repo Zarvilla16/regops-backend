@@ -1,7 +1,7 @@
 import { ServiceUnavailableException, UnprocessableEntityException } from "@nestjs/common";
 import { EventEmitter2 } from "@nestjs/event-emitter";
 import { DataSource, QueryRunner } from "typeorm";
-import { CustomerEntity, ScreeningCheckEntity, ScreeningMatchEntity, TenantEntity } from "@regops/db";
+import { CustomerEntity, ScreeningCheckEntity, TenantEntity } from "@regops/db";
 import { ScoreTrigger, ScreeningCheckStatus, ScreeningCheckType, ScreeningProviderName, ScreeningResultType, ScreeningTrigger } from "@regops/shared";
 import { ProviderTransientError, ScreeningInput, ScreeningResult } from "@regops/screening-engine";
 import { AuditService } from "../audit/audit.service";

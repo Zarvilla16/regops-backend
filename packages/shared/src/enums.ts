@@ -291,13 +291,15 @@ export enum CaseApprovalOutcome {
   REJECTED = "REJECTED",
 }
 
-/** Only SAR exists in v1 — this prompt seeds a minimal Report row; Backend Prompt 7 owns the rest. */
+/** SAR (from an approved Case) or CTR (from a qualifying cash Transaction) — see ReportEntity. */
 export enum ReportType {
   SAR = "SAR",
+  CTR = "CTR",
 }
 
-/** Draft-equivalent status this prompt creates the Report row with — Backend Prompt 7 is expected to add
- * further statuses (e.g. SUBMITTED, FILED) as it builds out the real Reports lifecycle. */
+/** DRAFT -> PENDING_CONFIRMATION -> SUBMITTED (reject returns PENDING_CONFIRMATION to DRAFT). SUBMITTED is terminal. */
 export enum ReportStatus {
   DRAFT = "DRAFT",
+  PENDING_CONFIRMATION = "PENDING_CONFIRMATION",
+  SUBMITTED = "SUBMITTED",
 }
