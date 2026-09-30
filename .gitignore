@@ -1,5 +1,12 @@
 ﻿node_modules/
 dist/
+# Exception: packages/shared's dist/ IS committed — it's consumed as a git
+# dependency from outside this workspace (see HANDOVER.md, "Shared types"),
+# and a git-dependency install has no monorepo build step to produce it.
+# Keep this in sync with src/ manually until real registry publishing
+# replaces this interim mechanism (also documented in HANDOVER.md).
+!packages/shared/dist/
+!packages/shared/dist/**
 .next/
 .turbo/
 *.tsbuildinfo

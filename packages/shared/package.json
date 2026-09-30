@@ -1,9 +1,18 @@
 {
   "name": "@regops/shared",
   "version": "0.1.0",
-  "private": true,
+  "description": "Shared DTO/enum types between RegOps's apps/api and apps/web.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "package.json"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://gitlab.com/Daviking95/regops.git",
+    "directory": "packages/shared"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "lint": "eslint . --max-warnings=0",
