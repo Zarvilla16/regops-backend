@@ -46,39 +46,90 @@ Full detail and judgment calls are in `OVERNIGHT_LOG.md`. Summary:
    backend test suite (153 tests) unaffected. **Not verified: actual browser behavior in mock
    mode** — click through `/reports` and `/reports/:id` (submit → confirm dialogs, XML/CSV/PDF
    export) before treating this as demo-ready.
-2. **Repo-split investigation (no restructure performed)** — confirmed `apps/web` has no
-   dependency, in either direction, on the backend engine packages or `apps/api`/`apps/worker`.
-   The actual restructure (splitting into two independently-buildable areas) was **not attempted**
-   — see "Needs a decision" below.
+2. **Repo-split investigation (physical restructure still not performed)** — confirmed `apps/web`
+   has no dependency, in either direction, on the backend engine packages or `apps/api`/`apps/worker`.
+   The shared-types question this raised has since been decided and partly implemented — see
+   "Decisions made" below — but the actual directory-level split (two independently-buildable
+   areas, two lockfiles) still hasn't happened.
 3. **Next.js ESLint plugin fixed** — `apps/web` now has `@next/eslint-plugin-next` wired in;
    the "Next.js plugin was not detected" build warning is gone. Verify: `pnpm build` in `apps/web`,
    no such warning in the output.
 4. **Husky pre-commit hook added** — every commit now runs `pnpm lint` (the whole monorepo) via
    `.husky/pre-commit`, and a failure blocks the commit. Verified live (deliberately broke lint,
    confirmed the commit was rejected).
-5. **CI lint step** — already existed in `.github/workflows/ci.yml`; nothing to add. See "Needs a
-   decision" below for why it's never actually run.
+5. **CI: dead workflow file deleted.** `.github/workflows/ci.yml` had a correctly-written lint step
+   already, but could never run on this GitLab-hosted repo — see "Decisions made" below. It's been
+   deleted rather than left as misleading dead weight. **CI does not exist for this project right
+   now** — a real `.gitlab-ci.yml` still needs to be written.
 
-## Needs a decision from you
+## Decisions made (resolved 2026-09-30, after this document's first draft)
 
-1. **CI can't run: the repo is on GitLab, the workflow is GitHub Actions.** `git remote -v` shows
-   `origin` is `https://gitlab.com/Daviking95/regops.git`, but `.github/workflows/ci.yml` is a
-   GitHub Actions file — it can only execute on GitHub (or a GitHub mirror of this repo). The
-   workflow itself is correctly written (lint/typecheck/test/build matrix, triggers on every push
-   and PR); it's a hosting mismatch, not a config bug. Pick one: mirror/migrate to GitHub, port
-   `ci.yml` to `.gitlab-ci.yml`, or something else.
-2. **The repo restructure (splitting `apps/web` from the backend into two independently-buildable
-   areas) was not attempted.** It hides a real architectural question: once `apps/web` is no
-   longer in the same pnpm workspace as the backend, how does it keep getting `@regops/shared`'s
-   types (the DTOs/enums the frontend depends on directly — exactly what tonight's Reports fix
-   leans on)? Four options, each a real commitment: vendor/copy the package (drifts silently),
-   publish it as a private npm package (needs a registry + publish step), git submodule/subtree
-   (single source of truth, but a workflow change for contributors), or keep one pnpm
-   workspace/lockfile but make each area's build genuinely independent within it. Pick one and the
-   mechanical part (moving files) is quick.
-3. **The Reports XML is not goAML-schema-valid** (see module table above) — this blocks any real
-   NFIU filing. Needs a dedicated pass against the actual XSD before Reports can be considered
-   production-ready, not just demo-ready.
+Both items below were originally logged as open questions for you; you decided both before ending
+the session. Recorded here as resolved, with what was actually done and what's still left to do.
+
+### 1. Shared types: `@regops/shared` becomes an externally-consumed package, never duplicated
+
+**Decision:** publish `packages/shared` as its own independent package that `apps/web` depends on
+externally — no copying/duplicating its types into the frontend, ever (this exact pattern —
+frontend and backend silently drifting on DTO shape — is what broke Alerts/Cases/Transactions/
+Rules/Reports earlier and took real sessions to fix each time). If a real private npm registry
+isn't feasible immediately, use a git dependency as a documented interim step.
+
+**What's done:**
+- `packages/shared/package.json`: removed `"private": true` (a real publish target can't carry
+  that), added `files`/`repository` fields for eventual real publishing.
+- `packages/shared/dist/` is now committed (a scoped exception in `.gitignore` — see the comment
+  there) so a git-dependency install has something to consume with **no build step required on
+  install** — this specifically sidesteps a real problem: `packages/shared`'s only devDependency,
+  `@regops/config` (`workspace:*`), cannot resolve outside this pnpm workspace, so any install
+  path that tried to run a build/`prepare` step for an external consumer would fail. Shipping
+  pre-built `dist/` avoids needing that dependency to resolve at all for a git install.
+- **Tested and confirmed working** (not just theorized): cloned this repo into a local bare git
+  repo and ran `pnpm install` against
+  `git+file://<local-bare-repo>#overnight/2026-09-30&path:packages/shared` from a scratch test
+  package — it resolved, installed, and both the runtime export (`ReportStatus.SUBMITTED`) and the
+  `package.json` fields came through correctly. This confirms pnpm's `#<ref>&path:<subdir>` git
+  syntax is the right mechanism and that this package is genuinely ready for it.
+
+**What's still open — exact next steps for whoever does this:**
+1. Push this branch (or merge it) to the real remote, so a real ref exists to point at:
+   `git push origin overnight/2026-09-30` (or merge to `integration/v1`/`master` first — your
+   call, this wasn't done tonight per the "never push" rule this session was given).
+2. In `apps/web/package.json`, change `"@regops/shared": "workspace:*"` to:
+   `"@regops/shared": "git+https://gitlab.com/Daviking95/regops.git#<branch-or-commit>&path:packages/shared"`
+   (use a specific commit SHA once this stabilizes, not a moving branch name, so installs are
+   reproducible).
+3. Run `pnpm install` at the root, verify `apps/web` still typechecks/builds/lints, commit the
+   updated `pnpm-lock.yaml`.
+4. **This is still an interim step, not the end state.** `packages/shared/dist/` must be manually
+   kept in sync with `src/` (rebuild-and-recommit) until real publishing replaces this — nothing
+   enforces that yet. **TODO for real publishing**: set up a private registry (npm's private
+   packages, GitHub Packages, or GitLab's own package registry since the repo is already there),
+   add a real `publish` step/CI job that runs on a version bump, and only then can step 2 above
+   change to a normal versioned semver dependency instead of a git URL.
+
+### 2. CI: the dead GitHub Actions workflow has been deleted
+
+**Decision:** delete `.github/workflows/ci.yml` rather than leave it in place — it could never run
+on this GitLab-hosted repo (confirmed: `origin` is `https://gitlab.com/Daviking95/regops.git`), and
+a workflow file that looks wired up but silently can't fire is actively misleading to anyone who
+finds it later and assumes CI exists.
+
+**What's done:** the file is deleted (`.github/` no longer exists in this repo).
+
+**What's still open — stated plainly:** **CI genuinely does not exist for this project right now.**
+Nothing runs lint/typecheck/test/build automatically on push or merge request. A real
+`.gitlab-ci.yml` needs to be written from scratch — it was **not** attempted tonight, per explicit
+instruction. The old workflow's job structure (a `[lint, typecheck, test, build]` matrix, Postgres +
+Redis services, `pnpm install --frozen-lockfile`, migrations before test/build) is a reasonable
+reference for what the new file needs to cover, but GitLab CI's YAML shape (`stages:`, `services:`,
+`script:`) is different enough from GitHub Actions that it's a genuine rewrite, not a port.
+
+## Still open — not a decision, a real gap
+
+- **The Reports XML is not goAML-schema-valid** (see module table above) — this blocks any real
+  NFIU filing. Needs a dedicated pass against the actual XSD before Reports can be considered
+  production-ready, not just demo-ready.
 
 ## Known issues (consolidated from `HANDOFF.md`, module by module)
 
@@ -196,8 +247,8 @@ works against the other backend.
 3. **`HANDOFF.md`** (repo root) — the full historical build log, module-by-module, with every bug
    found and fixed during development. Much more detail than this document if you need to
    understand *why* something is built the way it is. Note: its early "GitHub Actions CI has never
-   run — no remote configured" note is stale; see "Needs a decision" #1 above for the current,
-   correct explanation.
+   run — no remote configured" note is stale and the workflow file it refers to no longer exists —
+   see "Decisions made" #2 above for the current, correct state (CI doesn't exist yet at all).
 4. **Nothing runs at all** — check `docker-compose ps` (Postgres/Redis/Mailhog healthy?), that
    you've copied and filled in all three `.env` files, and that you ran `pnpm build` before
    `pnpm db:migrate` (migrations run from compiled `packages/db`, not source).
