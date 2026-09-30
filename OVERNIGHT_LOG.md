@@ -5,6 +5,58 @@ Entries are appended after each completed task. Read this first before looking a
 
 ---
 
+## FINAL SUMMARY (written 2026-09-30, 01:11, end of session)
+
+All 5 tasks were worked in order. Nothing was pushed, merged, or touched on `master` — everything
+lives on `overnight/2026-09-30`, 7 commits ahead of `master`/`integration/v1`, none
+amended/squashed. Full monorepo `pnpm lint`,
+`pnpm typecheck`, `pnpm test` (all 12 test tasks / 298 tests) and `apps/web`'s `pnpm build` all pass
+clean as of the last commit.
+
+**Fully done:**
+- **Task 1** — Reports mock-mode fix. Mock layer now emits real `ReportDto`/`ReportDetailDto`
+  shapes; new `/reports/:id/submit` and `/reports/:id/confirm` mock endpoints match the real
+  backend's maker-checker semantics exactly. Typecheck/lint/build/backend-tests all verified.
+- **Task 2** — Dependency investigation. Confirmed clean: no coupling either direction between
+  `apps/web` and the backend engine packages/apps.
+- **Task 4** — Linting. Next.js ESLint plugin gap fixed (verified: warning gone from `next build`
+  output). Husky pre-commit hook added and tested live (a deliberate lint failure was confirmed
+  blocked, then cleaned up). CI already had a lint step — nothing to add there.
+- **Task 5** — `HANDOVER.md` written at repo root.
+
+**Partially done / intentionally stopped:**
+- **Task 3** (repo restructure) — **not attempted**, stopped before moving any files. Task 2
+  confirmed the split is dependency-clean, but Task 3 itself hides a real architectural question
+  (how `apps/web` keeps consuming `@regops/shared`'s types once split out of the pnpm workspace)
+  with no single obviously-correct answer, and guessing wrong would have compounded through
+  Task 4's linting setup and this document. See "NEEDS MY DECISION" #2 below.
+- **Task 4**'s CI-triggering question — investigated and root-caused (see #1 below), not fixed, per
+  your explicit instruction not to go beyond the lint step itself.
+
+**Ordered list of things to check/decide, this morning:**
+
+1. **Read this file's "NEEDS MY DECISION" section right below** (2 items: CI hosting mismatch,
+   repo-split shared-code strategy) — nothing downstream depends on you reading it in a particular
+   order, but it's the fastest way to see everything that's blocked on you.
+2. **Click through Reports in mock mode** (`NEXT_PUBLIC_USE_MOCK_DATA=true`, `pnpm dev`, log in as
+   any seeded demo account, visit `/reports`) before treating Task 1 as demo-ready — I verified the
+   types/build/lint but explicitly did not drive a browser, per your instruction.
+3. **Decide #1: CI hosting.** Repo is on GitLab; `.github/workflows/ci.yml` can't run there. Pick:
+   mirror to GitHub, port to `.gitlab-ci.yml`, or something else.
+4. **Decide #2: repo-split shared-code strategy** (Task 3). Pick one of: vendor/copy
+   `@regops/shared`, publish it as a private package, git submodule/subtree, or keep one pnpm
+   workspace with independently-runnable per-area build scripts. Once decided, the actual file
+   moves are quick — I can do them (or a fresh session can, using `Entry 3` in this log for the
+   dependency-graph facts already gathered).
+5. **Reports XML is not goAML-schema-valid** (found while re-reading `HANDOFF.md` for the handover
+   doc, not new tonight, but worth flagging prominently) — do not let anyone file a real SAR/CTR
+   from this system until that's addressed. Now documented in `HANDOVER.md`'s module table.
+6. **Review the 7 commits on `overnight/2026-09-30`** (`git log master..overnight/2026-09-30`) and
+   decide whether/how to merge into `integration/v1` or `master` — nothing was merged
+   automatically, per the safety rules.
+
+---
+
 ## NEEDS MY DECISION
 
 Items flagged below as they came up. Full ordered checklist also at the very top of the final summary once the night's work wraps.
