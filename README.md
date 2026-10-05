@@ -27,7 +27,7 @@ later phases (see [Roadmap](#roadmap)).
 ## Stack
 
 Turborepo + pnpm workspaces · NestJS 10 + TypeORM 0.3 · PostgreSQL 15 (RLS) · Redis 7 + BullMQ ·
-Next.js 15 (App Router) + Tailwind + shadcn-style UI · TanStack Query · JWT auth (argon2id +
+JWT auth (argon2id +
 TOTP MFA).
 
 ## Repository structure
@@ -36,10 +36,9 @@ TOTP MFA).
 apps/
   api/     NestJS HTTP API
   worker/  BullMQ worker (skeleton — one recurring maintenance job in phase 0)
-  web/     Next.js console
 packages/
   db/      TypeORM entities, migrations (schema + RLS), seed script
-  shared/  Types/enums shared between api and web
+  shared/  Types/enums consumed by the frontend repo as a git dependency
   config/  Shared ESLint + TypeScript config
 ```
 
@@ -55,7 +54,6 @@ git clone <this-repo> regops && cd regops
 pnpm install
 
 cp apps/api/.env.example apps/api/.env
-cp apps/web/.env.example apps/web/.env
 cp apps/worker/.env.example apps/worker/.env
 # Edit apps/api/.env: JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must each be a
 # distinct random string of 64+ characters. Generate with e.g.:
@@ -66,11 +64,11 @@ pnpm build                # compiles packages/shared and packages/db (apps impor
 pnpm db:migrate           # applies schema + RLS policies (see packages/db/src/migrations)
 pnpm db:seed              # creates the accounts below
 
-pnpm dev                  # api on :4000, web on :3000, worker on :4001
+pnpm dev                  # api on :4000, worker on :4001
 ```
 
-Open http://localhost:3000, log in with one of the seeded accounts, and you should land on the
-placeholder dashboard showing your user, role and tenant.
+The API is now serving at http://localhost:4000 (Swagger at /docs). The frontend lives in a separate
+repo (ext-codezone-regops-frontend); point its `NEXT_PUBLIC_API_URL` at this API and add its origin to `CORS_ORIGINS`.
 
 ### Seeded accounts
 
@@ -147,3 +145,11 @@ this README (multi-tenancy, audit logging, idempotency, RLS) apply to all of the
 6. Case Management
 7. SAR/CTR Generation (NFIU goAML XML)
 8–10. Next.js console pages (customers, alerts, cases, reports, dashboards)
+
+
+## Shared types
+
+`packages/shared` is the single source of truth for DTOs/enums. The frontend repo depends on it via
+`git+https://github.com/data2bots-internal/ext-codezone-regops-backend.git#<sha>&path:packages/shared`
+and uses the committed `dist/` (no build step on install). After changing `packages/shared/src`, rebuild
+(`pnpm --filter @regops/shared build`), commit `dist/`, and bump the SHA in the frontend.
