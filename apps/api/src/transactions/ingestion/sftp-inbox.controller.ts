@@ -5,7 +5,7 @@ import { diskStorage } from "multer";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { FileStorage, LocalFileStorage } from "@regops/file-storage";
+import { createFileStorage, FileStorage } from "@regops/file-storage";
 import { UserRole } from "@regops/shared";
 import { JwtAuthGuard } from "../../auth/guards/jwt-auth.guard";
 import { RolesGuard } from "../../auth/guards/roles.guard";
@@ -34,8 +34,7 @@ export class SftpInboxController {
   private readonly storage: FileStorage;
 
   constructor() {
-    const localStorageDir = process.env.LOCAL_STORAGE_DIR ?? path.resolve(__dirname, "../../../../../.local-storage");
-    this.storage = new LocalFileStorage(localStorageDir);
+    this.storage = createFileStorage(path.resolve(__dirname, "../../../../../.local-storage"));
   }
 
   @Post()

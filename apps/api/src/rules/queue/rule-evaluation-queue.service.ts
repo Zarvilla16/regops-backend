@@ -13,7 +13,11 @@ function parseRedisUrl(url: string) {
   return {
     host: parsed.hostname,
     port: Number(parsed.port || 6379),
+    username: parsed.username || undefined,
     password: parsed.password || undefined,
+    // family 0 = dual-stack lookup; Railway's private network (*.railway.internal) is IPv6-only.
+    family: 0,
+    tls: parsed.protocol === "rediss:" ? {} : undefined,
     maxRetriesPerRequest: null as null,
   };
 }

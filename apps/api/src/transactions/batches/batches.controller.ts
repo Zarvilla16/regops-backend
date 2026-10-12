@@ -4,7 +4,7 @@ import { Response } from "express";
 import * as path from "path";
 import { QueryRunner } from "typeorm";
 import { UserRole } from "@regops/shared";
-import { FileStorage, LocalFileStorage } from "@regops/file-storage";
+import { createFileStorage, FileStorage } from "@regops/file-storage";
 import { JwtAuthGuard } from "../../auth/guards/jwt-auth.guard";
 import { RolesGuard } from "../../auth/guards/roles.guard";
 import { TenantGuard } from "../../auth/guards/tenant.guard";
@@ -26,8 +26,7 @@ export class BatchesController {
   constructor(private readonly ingestionBatchService: IngestionBatchService) {
     // Same construction pattern as CustomersService/CustomerIngestionService — no
     // Nest DI token for FileStorage exists in this codebase (see those files).
-    const localStorageDir = process.env.LOCAL_STORAGE_DIR ?? path.resolve(__dirname, "../../../../../.local-storage");
-    this.storage = new LocalFileStorage(localStorageDir);
+    this.storage = createFileStorage(path.resolve(__dirname, "../../../../../.local-storage"));
   }
 
   @Get()

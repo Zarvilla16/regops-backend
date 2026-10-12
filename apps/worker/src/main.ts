@@ -23,7 +23,7 @@ import {
   TransactionIngestionJobData,
   TransactionIngestionJobResult,
 } from "@regops/shared";
-import { LocalFileStorage } from "@regops/file-storage";
+import { createFileStorage } from "@regops/file-storage";
 import { processIngestionJob } from "./customer-ingestion/ingestion-job.processor";
 import { processAsyncScreeningJob } from "./screening/async-screening.processor";
 import { processRescreenJob } from "./screening/rescreen-job.processor";
@@ -59,7 +59,11 @@ function parseRedisUrl(url: string) {
   return {
     host: parsed.hostname,
     port: Number(parsed.port || 6379),
+    username: parsed.username || undefined,
     password: parsed.password || undefined,
+    // family 0 = dual-stack lookup; Railway's private network (*.railway.internal) is IPv6-only.
+    family: 0,
+    tls: parsed.protocol === "rediss:" ? {} : undefined,
     maxRetriesPerRequest: null,
   };
 }
@@ -80,7 +84,7 @@ async function bootstrap(): Promise<void> {
   });
   await adminDataSource.initialize();
 
-  const storage = new LocalFileStorage(LOCAL_STORAGE_DIR);
+  const storage = createFileStorage(LOCAL_STORAGE_DIR);
 
   // Backend Prompt 4's own queue+events pair — built before maintenanceWorker
   // so its job handler's poll-sftp-inboxes branch can close over both.

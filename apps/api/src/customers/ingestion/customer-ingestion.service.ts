@@ -12,7 +12,7 @@ import {
   IngestionJobData,
   IngestionJobResult,
 } from "@regops/shared";
-import { FileStorage, LocalFileStorage } from "@regops/file-storage";
+import { createFileStorage, FileStorage } from "@regops/file-storage";
 import { CUSTOMER_EVENTS } from "../customers.events";
 
 /** Same host:port:password shape BullMQ wants — duplicated from apps/worker rather than shared;
@@ -22,7 +22,11 @@ function parseRedisUrl(url: string) {
   return {
     host: parsed.hostname,
     port: Number(parsed.port || 6379),
+    username: parsed.username || undefined,
     password: parsed.password || undefined,
+    // family 0 = dual-stack lookup; Railway's private network (*.railway.internal) is IPv6-only.
+    family: 0,
+    tls: parsed.protocol === "rediss:" ? {} : undefined,
     maxRetriesPerRequest: null as null,
   };
 }
@@ -52,9 +56,7 @@ export class CustomerIngestionService implements OnModuleDestroy {
       void this.onJobCompleted(jobId);
     });
 
-    const localStorageDir =
-      process.env.LOCAL_STORAGE_DIR ?? path.resolve(__dirname, "../../../../../.local-storage");
-    this.storage = new LocalFileStorage(localStorageDir);
+    this.storage = createFileStorage(path.resolve(__dirname, "../../../../../.local-storage"));
   }
 
   private async onJobCompleted(jobId: string): Promise<void> {

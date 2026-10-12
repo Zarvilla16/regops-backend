@@ -4,7 +4,7 @@ import * as path from "path";
 import { Readable } from "stream";
 import { QueryRunner, SelectQueryBuilder } from "typeorm";
 import { CustomerEntity, PepDetailsEntity } from "@regops/db";
-import { FileStorage, LocalFileStorage } from "@regops/file-storage";
+import { createFileStorage, FileStorage } from "@regops/file-storage";
 import {
   AuthUserContext,
   CustomerDto,
@@ -59,8 +59,7 @@ export class CustomersService {
     private readonly eventEmitter: EventEmitter2,
     private readonly screeningService: ScreeningService,
   ) {
-    const localStorageDir = process.env.LOCAL_STORAGE_DIR ?? path.resolve(__dirname, "../../../../.local-storage");
-    this.photoStorage = new LocalFileStorage(localStorageDir);
+    this.photoStorage = createFileStorage(path.resolve(__dirname, "../../../../.local-storage"));
   }
 
   private maskId(value: string | null): string | null {

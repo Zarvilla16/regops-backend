@@ -4,7 +4,7 @@ import * as path from "path";
 import { Readable } from "stream";
 import { QueryRunner } from "typeorm";
 import { CaseEvidenceEntity } from "@regops/db";
-import { FileStorage, LocalFileStorage } from "@regops/file-storage";
+import { createFileStorage, FileStorage } from "@regops/file-storage";
 import { AuthUserContext, CaseEvidenceDto, CaseStatus } from "@regops/shared";
 import { AuditService } from "../audit/audit.service";
 import { RequestMeta } from "../users/users.service";
@@ -38,8 +38,7 @@ export class CaseEvidenceService {
     private readonly auditService: AuditService,
     private readonly casesService: CasesService,
   ) {
-    const localStorageDir = process.env.LOCAL_STORAGE_DIR ?? path.resolve(__dirname, "../../../../.local-storage");
-    this.storage = new LocalFileStorage(localStorageDir);
+    this.storage = createFileStorage(path.resolve(__dirname, "../../../../.local-storage"));
   }
 
   /** Section 3.4: validated by BOTH MIME type and filename extension — don't

@@ -4,7 +4,7 @@ import { Readable } from "stream";
 import { Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { DataSource, QueryRunner } from "typeorm";
 import { CustomerEntity, RuleEntity, RuleEvaluationEntity, RuleReplayEntity, TransactionEntity } from "@regops/db";
-import { FileStorage, LocalFileStorage } from "@regops/file-storage";
+import { createFileStorage, FileStorage } from "@regops/file-storage";
 import { RuleEvaluationResultStatus, RuleReplayStatus } from "@regops/shared";
 import { dispatchEvaluation, EvaluationContext } from "@regops/rules-engine";
 import { EvaluatorFactsGatheringService } from "../facts/evaluator-facts-gathering.service";
@@ -44,8 +44,7 @@ export class RuleReplayService {
     private readonly factsGatheringService: EvaluatorFactsGatheringService,
     private readonly alertsService: AlertsService,
   ) {
-    const localStorageDir = process.env.LOCAL_STORAGE_DIR ?? path.resolve(__dirname, "../../../../../.local-storage");
-    this.storage = new LocalFileStorage(localStorageDir);
+    this.storage = createFileStorage(path.resolve(__dirname, "../../../../../.local-storage"));
   }
 
   async replay(options: RuleReplayOptions): Promise<string> {
