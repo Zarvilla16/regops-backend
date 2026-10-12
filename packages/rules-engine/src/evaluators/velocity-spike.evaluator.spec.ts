@@ -51,6 +51,13 @@ describe("evaluateVelocitySpike", () => {
     expect(result.fired).toBe(true);
   });
 
+  it("does not fire for a backdated transaction processed today, even when today's volume spikes", () => {
+    const backdated = ctx(365);
+    backdated.transaction.occurredAt = new Date(NOW.getTime() - 3 * 86_400_000);
+    const result = evaluateVelocitySpike(backdated, {}, stats({ todayTotal: 7_000_000 }));
+    expect(result.fired).toBe(false);
+  });
+
   it("does not fire on 1M/day for 30 days then 3M today (3x < 5x threshold)", () => {
     const result = evaluateVelocitySpike(ctx(365), {}, stats({ todayTotal: 3_000_000 }));
     expect(result.fired).toBe(false);

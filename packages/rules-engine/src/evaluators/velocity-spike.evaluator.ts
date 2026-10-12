@@ -45,6 +45,9 @@ export function evaluateVelocitySpike(
   const dormancyReactivationMinDays = config.dormancyReactivationMinDays ?? 30;
 
   if (stats.customerAgeDays < excludeNewCustomersDays) return { fired: false };
+  // The spike is measured over today's volume, so only a transaction that occurred today may trigger it or join its
+  // alert. A backdated transaction (history backfill) processed today must not be attached to today's alert.
+  if (dayBucket(ctx.transaction.occurredAt) !== dayBucket(ctx.now)) return { fired: false };
   if (stats.todayTotal < minAbsoluteAmount) return { fired: false };
 
   let spikeRatio: number | null;
