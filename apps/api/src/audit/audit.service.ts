@@ -14,6 +14,16 @@ export interface RecordAuditParams {
   userAgent?: string | null;
 }
 
+export interface AuditLogFilters {
+  userId?: string;
+  entityTypes?: string[];
+  entityId?: string;
+  action?: string;
+  /** Inclusive YYYY-MM-DD bounds. */
+  dateFrom?: string;
+  dateTo?: string;
+}
+
 /**
  * Per-entity denylist of fields that must never be persisted into
  * before_state / after_state, even though callers are expected to already
@@ -68,6 +78,38 @@ export class AuditService {
         userAgent: params.userAgent ?? null,
       }),
     );
+  }
+
+  /** Filtered, paginated, newest first. Date bounds also let Postgres prune the partitioned audit_log. */
+  async findPage(
+    queryRunner: QueryRunner,
+    tenantId: string,
+    filters: AuditLogFilters,
+    page: number,
+    limit: number,
+  ): Promise<{ data: AuditLogEntity[]; meta: { page: number; limit: number; total: number } }> {
+    const qb = queryRunner.manager
+      .getRepository(AuditLogEntity)
+      .createQueryBuilder("a")
+      .where("a.tenant_id = :tenantId", { tenantId });
+
+    if (filters.userId) qb.andWhere("a.user_id = :userId", { userId: filters.userId });
+    if (filters.entityTypes?.length) qb.andWhere("a.entity_type IN (:...entityTypes)", { entityTypes: filters.entityTypes });
+    if (filters.entityId) qb.andWhere("a.entity_id = :entityId", { entityId: filters.entityId });
+    if (filters.action?.trim()) {
+      const escaped = filters.action.trim().replace(/[\\%_]/g, (c) => `\\${c}`);
+      qb.andWhere("a.action ILIKE :action", { action: `%${escaped}%` });
+    }
+    if (filters.dateFrom) qb.andWhere("a.created_at >= :dateFrom::date", { dateFrom: filters.dateFrom });
+    if (filters.dateTo) qb.andWhere("a.created_at < (:dateTo::date + interval '1 day')", { dateTo: filters.dateTo });
+
+    qb.orderBy("a.created_at", "DESC")
+      .addOrderBy("a.id", "DESC")
+      .skip((page - 1) * limit)
+      .take(limit);
+
+    const [data, total] = await qb.getManyAndCount();
+    return { data, meta: { page, limit, total } };
   }
 
   async findForTenant(
