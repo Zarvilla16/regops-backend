@@ -55,6 +55,12 @@ async function bootstrap(): Promise<void> {
 
   app.enableShutdownHooks();
 
+  if (configService.get<string>("nodeEnv") === "production" && /localhost|127\.0\.0\.1/.test(configService.get<string>("frontendUrl") ?? "")) {
+    console.warn(
+      "WARNING: FRONTEND_URL / CORS_ORIGINS point at localhost; invite and password-reset links will not work. Set FRONTEND_URL.",
+    );
+  }
+
   const port = configService.get<number>("port") ?? 4000;
   await app.listen(port);
   console.log(`RegOps API listening on port ${port}`);

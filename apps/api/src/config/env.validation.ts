@@ -15,6 +15,12 @@ export const envSchema = z.object({
 
   CORS_ORIGINS: z.string().default("http://localhost:3000"),
   MFA_ISSUER: z.string().default("RegOps"),
+
+  /** Public base URL of the console; used to build the links in invite / password-reset e-mails. */
+  FRONTEND_URL: z.string().url().optional(),
+  /** Resend API key. Unset = no mail is sent (logged in development, warned in production). */
+  RESEND_API_KEY: z.string().min(1).optional(),
+  MAIL_FROM: z.string().min(3).default("RegOps <no-reply@regops.local>"),
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;

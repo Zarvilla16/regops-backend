@@ -58,6 +58,21 @@ export class UsersController {
     });
   }
 
+  @Post(":id/resend-invite")
+  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN)
+  async resendInvite(
+    @CurrentTenant() tenantId: string,
+    @CurrentQueryRunner() queryRunner: QueryRunner,
+    @CurrentUser() currentUser: AuthUserContext,
+    @Param("id") id: string,
+    @Req() req: Request,
+  ) {
+    return this.usersService.resendInvite(queryRunner, tenantId, id, currentUser, {
+      ipAddress: req.ip ?? null,
+      userAgent: req.header("user-agent") ?? null,
+    });
+  }
+
   @Patch(":id")
   @Idempotent()
   @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN)

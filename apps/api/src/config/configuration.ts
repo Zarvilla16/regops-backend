@@ -21,6 +21,13 @@ export default function configuration() {
     },
     corsOrigins: env.CORS_ORIGINS.split(",").map((origin) => origin.trim()),
     mfaIssuer: env.MFA_ISSUER,
+    // Base of every invite / reset link. Falls back to the first allowed CORS origin, then to localhost
+    // (main.ts warns in production when the result still points at localhost).
+    frontendUrl: (env.FRONTEND_URL ?? env.CORS_ORIGINS.split(",")[0]?.trim() ?? "http://localhost:3000").replace(/\/+$/, ""),
+    mail: {
+      resendApiKey: env.RESEND_API_KEY,
+      from: env.MAIL_FROM,
+    },
   };
 }
 

@@ -26,6 +26,17 @@ describe("validateEnv", () => {
     ).toThrow(/JWT_ACCESS_SECRET/);
   });
 
+  it("mail settings are optional and default sensibly", () => {
+    const result = validateEnv(VALID_ENV);
+    expect(result.RESEND_API_KEY).toBeUndefined();
+    expect(result.FRONTEND_URL).toBeUndefined();
+    expect(result.MAIL_FROM).toMatch(/RegOps/);
+  });
+
+  it("rejects a FRONTEND_URL that is not a URL", () => {
+    expect(() => validateEnv({ ...VALID_ENV, FRONTEND_URL: "not a url" })).toThrow(/FRONTEND_URL/);
+  });
+
   it("rejects identical access and refresh secrets", () => {
     expect(() =>
       validateEnv({ ...VALID_ENV, JWT_REFRESH_SECRET: VALID_ENV.JWT_ACCESS_SECRET }),

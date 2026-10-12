@@ -1,6 +1,6 @@
 import { MiddlewareConsumer, Module, NestModule } from "@nestjs/common";
 import { ConfigModule, ConfigService } from "@nestjs/config";
-import { APP_FILTER, APP_INTERCEPTOR } from "@nestjs/core";
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from "@nestjs/core";
 import { EventEmitterModule } from "@nestjs/event-emitter";
 import { JwtModule } from "@nestjs/jwt";
 import { ScheduleModule } from "@nestjs/schedule";
@@ -15,6 +15,8 @@ import { ResponseInterceptor } from "./common/interceptors/response.interceptor"
 import { TransactionInterceptor } from "./common/interceptors/transaction.interceptor";
 import { TenantContextMiddleware } from "./common/middleware/tenant-context.middleware";
 import { AuthModule } from "./auth/auth.module";
+import { PasswordChangeGuard } from "./auth/guards/password-change.guard";
+import { MailModule } from "./mail/mail.module";
 import { TenantsModule } from "./tenants/tenants.module";
 import { UsersModule } from "./users/users.module";
 import { AuditModule } from "./audit/audit.module";
@@ -50,6 +52,7 @@ import { ReportsModule } from "./reports/reports.module";
     ScheduleModule.forRoot(),
     EventEmitterModule.forRoot(),
     AuditModule,
+    MailModule,
     AuthModule,
     TenantsModule,
     UsersModule,
@@ -64,6 +67,7 @@ import { ReportsModule } from "./reports/reports.module";
   providers: [
     TenantContextMiddleware,
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
+    { provide: APP_GUARD, useClass: PasswordChangeGuard },
     // Order matters: Transaction is outermost so it commits/rolls back the
     // request's connection (see TenantContextMiddleware) only after every
     // other interceptor has finished using it — a client must never see a

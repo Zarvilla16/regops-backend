@@ -54,6 +54,10 @@ export class UserEntity {
   @Column({ name: "mfa_secret", type: "text", nullable: true })
   mfaSecret!: string | null;
 
+  /** Set when an admin created the account with a temporary password; cleared by /auth/change-password. */
+  @Column({ name: "must_change_password", type: "boolean", default: false })
+  mustChangePassword!: boolean;
+
   @Column({ name: "last_login_at", type: "timestamptz", nullable: true })
   lastLoginAt!: Date | null;
 

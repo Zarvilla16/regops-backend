@@ -1,5 +1,7 @@
 import {
+  BadRequestException,
   ConflictException,
+  ForbiddenException,
   HttpException,
   Injectable,
   Logger,
@@ -10,11 +12,17 @@ import { JwtService } from "@nestjs/jwt";
 import * as argon2 from "argon2";
 import * as crypto from "crypto";
 import { DataSource, QueryRunner } from "typeorm";
-import { RefreshTokenEntity, TenantEntity, UserEntity } from "@regops/db";
-import { AuthUserContext } from "@regops/shared";
+import { IsNull, MoreThan } from "typeorm";
+import { PasswordTokenEntity, PasswordTokenPurpose, RefreshTokenEntity, TenantEntity, UserEntity } from "@regops/db";
+import { AuthUserContext, UserStatus } from "@regops/shared";
 import { AuditService } from "../audit/audit.service";
+import { MailService } from "../mail/mail.service";
+import { passwordChangedMail, passwordResetMail } from "../mail/mail-templates";
 import { MfaService } from "./mfa.service";
 import { RequestMeta } from "../users/users.service";
+import { RESET_REQUEST_COOLDOWN_MS, RESET_TOKEN_TTL_MS, generatePasswordToken, hashPasswordToken } from "./password-token.util";
+
+const ARGON2_OPTIONS: argon2.Options = { type: argon2.argon2id, memoryCost: 65536, timeCost: 3 };
 
 const MAX_FAILED_ATTEMPTS = 5;
 const FAILED_ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
@@ -46,6 +54,7 @@ export class AuthService {
     private readonly configService: ConfigService,
     private readonly mfaService: MfaService,
     private readonly auditService: AuditService,
+    private readonly mailService: MailService,
   ) {}
 
   private hashToken(token: string): string {
@@ -78,11 +87,14 @@ export class AuthService {
   }
 
   private signAccessToken(user: UserEntity): string {
-    const payload: AuthUserContext = {
+    // `mcp` ("must change password") restricts the token to the routes marked @AllowPasswordChangePending;
+    // see PasswordChangeGuard. It is re-derived from the database on every login and refresh.
+    const payload: AuthUserContext & { mcp?: boolean } = {
       sub: user.id,
       tenantId: user.tenantId,
       role: user.role,
       email: user.email,
+      ...(user.mustChangePassword ? { mcp: true } : {}),
     };
     return this.jwtService.sign(payload, {
       secret: this.configService.get<string>("jwt.accessSecret"),
@@ -151,6 +163,7 @@ export class AuthService {
       role: user.role,
       status: user.status,
       mfaEnabled: user.mfaEnabled,
+      mustChangePassword: user.mustChangePassword,
       lastLoginAt: user.lastLoginAt,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
@@ -233,6 +246,12 @@ export class AuthService {
         .getRepository(UserEntity)
         .update({ id: user.id }, { failedLoginCount: 0 });
 
+      // Checked only after the password is proven right, so a suspended account's status isn't
+      // disclosed to someone who doesn't know its password.
+      if (user.status === UserStatus.SUSPENDED) {
+        return { outcome: "suspended" as const };
+      }
+
       if (user.mfaEnabled) {
         return {
           outcome: "mfa" as const,
@@ -253,6 +272,11 @@ export class AuthService {
         throw new LockedException({
           code: "ACCOUNT_LOCKED",
           message: "This account is temporarily locked due to too many failed login attempts.",
+        });
+      case "suspended":
+        throw new ForbiddenException({
+          code: "ACCOUNT_SUSPENDED",
+          message: "This account has been suspended. Contact your administrator.",
         });
       case "mfa":
       case "success":
@@ -283,7 +307,7 @@ export class AuthService {
       const user = await qr.manager.getRepository(UserEntity).findOne({
         where: { id: payload.sub },
       });
-      if (!user || !user.mfaSecret) {
+      if (!user || !user.mfaSecret || user.status === UserStatus.SUSPENDED) {
         return { outcome: "invalid_token" as const };
       }
 
@@ -374,7 +398,7 @@ export class AuthService {
       // the `user` table has RLS enabled, and a freshly-pooled connection
       // with no tenant/bypass context set would have every row filtered out.
       const user = await qr.manager.getRepository(UserEntity).findOne({ where: { id: existing.userId } });
-      if (!user) {
+      if (!user || user.status === UserStatus.SUSPENDED) {
         throw new UnauthorizedException({ code: "INVALID_REFRESH_TOKEN", message: "Invalid refresh token." });
       }
 
@@ -387,6 +411,191 @@ export class AuthService {
 
       return { accessToken, refreshToken };
     });
+  }
+
+  private async revokeAllRefreshTokens(qr: QueryRunner, userId: string): Promise<void> {
+    await qr.manager
+      .getRepository(RefreshTokenEntity)
+      .update({ userId, revokedAt: IsNull() }, { revokedAt: new Date() });
+  }
+
+  /**
+   * Starts a password reset. Always completes the same way whether or not the address belongs to an account
+   * (no account enumeration): the caller learns nothing, and the mail is sent in the background so response
+   * time doesn't differ either. At most one reset mail per account per RESET_REQUEST_COOLDOWN_MS.
+   */
+  async forgotPassword(email: string, meta: RequestMeta): Promise<void> {
+    const outbound = await this.withBypassQueryRunner(async (qr) => {
+      const users = await qr.manager
+        .getRepository(UserEntity)
+        .createQueryBuilder("u")
+        .where("lower(u.email) = lower(:email)", { email })
+        .getMany();
+      // Same rule as login(): an address shared across tenants can't be resolved to one account.
+      if (users.length !== 1) return null;
+      const user = users[0];
+      if (user.status === UserStatus.SUSPENDED) return null;
+
+      const tokens = qr.manager.getRepository(PasswordTokenEntity);
+      const recent = await tokens.findOne({
+        where: {
+          userId: user.id,
+          purpose: PasswordTokenPurpose.RESET,
+          createdAt: MoreThan(new Date(Date.now() - RESET_REQUEST_COOLDOWN_MS)),
+        },
+      });
+      if (recent) return null;
+
+      const { token, tokenHash } = generatePasswordToken();
+      await tokens.save(
+        tokens.create({
+          userId: user.id,
+          purpose: PasswordTokenPurpose.RESET,
+          tokenHash,
+          expiresAt: new Date(Date.now() + RESET_TOKEN_TTL_MS),
+        }),
+      );
+      await this.auditService.record(qr, {
+        tenantId: user.tenantId,
+        userId: user.id,
+        action: "user.password.reset_requested",
+        entityType: "user",
+        entityId: user.id,
+        ipAddress: meta.ipAddress,
+        userAgent: meta.userAgent,
+      });
+      return { user, token };
+    });
+
+    if (outbound) {
+      const url = `${this.configService.get<string>("frontendUrl")}/reset-password?token=${encodeURIComponent(outbound.token)}`;
+      void this.mailService.send(
+        passwordResetMail({
+          to: outbound.user.email,
+          fullName: outbound.user.fullName,
+          url,
+          expiresInMinutes: RESET_TOKEN_TTL_MS / 60_000,
+        }),
+      );
+    }
+  }
+
+  /**
+   * Completes a reset or accepts an invitation: sets the password, clears lockout and the temporary-password
+   * flag, activates an INVITED account, burns every outstanding token for the user and signs out all sessions.
+   */
+  async resetPassword(token: string, newPassword: string, meta: RequestMeta): Promise<void> {
+    const tokenHash = hashPasswordToken(token);
+    const result = await this.withBypassQueryRunner(async (qr) => {
+      const tokens = qr.manager.getRepository(PasswordTokenEntity);
+      const row = await tokens.findOne({ where: { tokenHash } });
+      if (!row || row.usedAt || row.expiresAt.getTime() < Date.now()) return null;
+
+      const users = qr.manager.getRepository(UserEntity);
+      const user = await users.findOne({ where: { id: row.userId } });
+      if (!user || user.status === UserStatus.SUSPENDED) return null;
+
+      // Single-use even under concurrent requests: only the request that flips used_at wins.
+      const claimed = await tokens.update({ id: row.id, usedAt: IsNull() }, { usedAt: new Date() });
+      if (claimed.affected !== 1) return null;
+
+      await users.update(
+        { id: user.id },
+        {
+          passwordHash: await argon2.hash(newPassword, ARGON2_OPTIONS),
+          mustChangePassword: false,
+          failedLoginCount: 0,
+          lockedUntil: null,
+          status: user.status === UserStatus.INVITED ? UserStatus.ACTIVE : user.status,
+        },
+      );
+      await tokens.update({ userId: user.id, usedAt: IsNull() }, { usedAt: new Date() });
+      await this.revokeAllRefreshTokens(qr, user.id);
+      await this.auditService.record(qr, {
+        tenantId: user.tenantId,
+        userId: user.id,
+        action: row.purpose === PasswordTokenPurpose.INVITE ? "user.invite.accepted" : "user.password.reset",
+        entityType: "user",
+        entityId: user.id,
+        ipAddress: meta.ipAddress,
+        userAgent: meta.userAgent,
+      });
+      return { user, purpose: row.purpose };
+    });
+
+    if (!result) {
+      throw new BadRequestException({
+        code: "INVALID_OR_EXPIRED_TOKEN",
+        message: "This link is invalid or has expired. Request a new one.",
+      });
+    }
+    if (result.purpose === PasswordTokenPurpose.RESET) {
+      void this.mailService.send(passwordChangedMail({ to: result.user.email, fullName: result.user.fullName }));
+    }
+  }
+
+  /**
+   * Authenticated password change (also the way out of the temporary-password state). A wrong current
+   * password counts as a failed login attempt, so this can't be used to guess it. Every session is signed
+   * out and a fresh token pair is returned for the caller to keep working with.
+   */
+  async changePassword(currentUser: AuthUserContext, currentPassword: string, newPassword: string, meta: RequestMeta) {
+    const result = await this.withBypassQueryRunner(async (qr) => {
+      const users = qr.manager.getRepository(UserEntity);
+      const user = await users.findOne({ where: { id: currentUser.sub } });
+      if (!user || user.status === UserStatus.SUSPENDED) return { outcome: "invalid" as const };
+      if (this.isLocked(user)) return { outcome: "locked" as const };
+
+      if (!(await argon2.verify(user.passwordHash, currentPassword).catch(() => false))) {
+        await this.recordFailedAttempt(qr, user, meta);
+        return { outcome: "wrong_password" as const };
+      }
+      if (await argon2.verify(user.passwordHash, newPassword).catch(() => false)) {
+        return { outcome: "same_password" as const };
+      }
+
+      user.passwordHash = await argon2.hash(newPassword, ARGON2_OPTIONS);
+      user.mustChangePassword = false;
+      user.failedLoginCount = 0;
+      if (user.status === UserStatus.INVITED) user.status = UserStatus.ACTIVE;
+      await users.update(
+        { id: user.id },
+        { passwordHash: user.passwordHash, mustChangePassword: false, failedLoginCount: 0, status: user.status },
+      );
+      await this.revokeAllRefreshTokens(qr, user.id);
+      const accessToken = this.signAccessToken(user);
+      const refreshToken = await this.issueRefreshToken(qr, user, meta);
+      await this.auditService.record(qr, {
+        tenantId: user.tenantId,
+        userId: user.id,
+        action: "user.password.change",
+        entityType: "user",
+        entityId: user.id,
+        ipAddress: meta.ipAddress,
+        userAgent: meta.userAgent,
+      });
+      return { outcome: "success" as const, user, accessToken, refreshToken };
+    });
+
+    switch (result.outcome) {
+      case "invalid":
+        throw new UnauthorizedException({ code: "USER_NOT_FOUND", message: "User not found." });
+      case "locked":
+        throw new LockedException({
+          code: "ACCOUNT_LOCKED",
+          message: "This account is temporarily locked due to too many failed attempts.",
+        });
+      case "wrong_password":
+        throw new UnauthorizedException({ code: "INVALID_CURRENT_PASSWORD", message: "Your current password is incorrect." });
+      case "same_password":
+        throw new BadRequestException({
+          code: "PASSWORD_UNCHANGED",
+          message: "Your new password must be different from your current password.",
+        });
+      case "success":
+        void this.mailService.send(passwordChangedMail({ to: result.user.email, fullName: result.user.fullName }));
+        return { accessToken: result.accessToken, refreshToken: result.refreshToken, user: this.toUserDto(result.user) };
+    }
   }
 
   async logout(refreshToken: string): Promise<void> {

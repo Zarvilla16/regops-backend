@@ -37,6 +37,8 @@ Railway no longer accepts config-file paths via its API, so build/start/pre-depl
 | `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET` | yes | no | From `.env.production.local` |
 | `CORS_ORIGINS` | yes | no | Frontend origin(s), comma-separated, no trailing slash |
 | `CLOUDINARY_URL` | yes | yes | See section 2 |
+| `FRONTEND_URL` | yes | no | Public console URL, base of invite / reset links (falls back to the first `CORS_ORIGINS` entry; the API logs a warning if it still says localhost) |
+| `RESEND_API_KEY`, `MAIL_FROM` | yes | no | Resend key and a sender on a domain verified in Resend. Unset = no mail is sent (invites and resets then can't reach users; a Super Admin can still create users with a temporary password) |
 
 Do **not** set `SEED_*` or run `pnpm db:seed` in production: the seed creates demo tenant data with fixed passwords. Instead create the first Super Admin once with `pnpm db:bootstrap` (needs `DATABASE_ADMIN_URL`, `BOOTSTRAP_SUPER_ADMIN_EMAIL`, `BOOTSTRAP_SUPER_ADMIN_PASSWORD` of 12+ chars, optional `BOOTSTRAP_SUPER_ADMIN_NAME`). It is idempotent and never resets an existing Super Admin.
 

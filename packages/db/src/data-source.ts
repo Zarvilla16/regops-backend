@@ -5,6 +5,7 @@ import { DataSource, DataSourceOptions } from "typeorm";
 import { TenantEntity } from "./entities/tenant.entity";
 import { UserEntity } from "./entities/user.entity";
 import { RefreshTokenEntity } from "./entities/refresh-token.entity";
+import { PasswordTokenEntity } from "./entities/password-token.entity";
 import { AuditLogEntity } from "./entities/audit-log.entity";
 import { IdempotencyKeyEntity } from "./entities/idempotency-key.entity";
 import { CustomerEntity } from "./entities/customer.entity";
@@ -41,6 +42,7 @@ export const entities = [
   TenantEntity,
   UserEntity,
   RefreshTokenEntity,
+  PasswordTokenEntity,
   AuditLogEntity,
   IdempotencyKeyEntity,
   CustomerEntity,
