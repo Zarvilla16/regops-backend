@@ -189,7 +189,7 @@ cp apps/worker/.env.example apps/worker/.env
 docker-compose up -d      # postgres :5433, redis :6379, mailhog :8025 (UI at :8025)
 pnpm build                # compiles packages/shared and packages/db first
 pnpm db:migrate           # applies schema + RLS policies
-pnpm db:seed              # creates the seeded accounts below
+pnpm db:seed              # creates the local Super Admin
 
 pnpm dev                  # api :4000, web :3000, worker :4001
 ```
@@ -204,37 +204,9 @@ Pre-commit now runs `pnpm lint` automatically (Husky) — a lint failure blocks 
 `pnpm build --filter @regops/shared --filter @regops/db` to refresh the compiled output the other
 apps consume — they import the built `dist/`, not the TypeScript source, directly.
 
-### Demo login credentials
+### Local login
 
-Two independent sets exist — **do not mix them up**, they don't work against each other's backend:
-
-**Real backend** (`NEXT_PUBLIC_USE_MOCK_DATA=false`, or hitting `apps/api` directly) — created by
-`pnpm db:seed`:
-
-| Role | Email | Password |
-| --- | --- | --- |
-| SUPER_ADMIN | `superadmin@regops.dev` | `SuperAdmin!2026` |
-| TENANT_ADMIN (Demo MFB Limited) | `admin@demomfb.dev` | `TenantAdmin!2026` |
-| COMPLIANCE_OFFICER (Demo MFB Limited) | `compliance@demomfb.dev` | `Compliance!2026` |
-
-Override via env vars in `apps/api/.env` (`SEED_SUPER_ADMIN_EMAIL`, etc.) — see
-`apps/api/.env.example`. MFA is not enforced on seeded accounts by default; enroll via
-`POST /auth/mfa/setup` → `POST /auth/mfa/enable` from a logged-in session.
-
-**Mock frontend mode** (`NEXT_PUBLIC_USE_MOCK_DATA=true`, the default if unset — this is almost
-certainly what you're using if you just cloned and ran `pnpm dev` without touching env vars) — same
-password for every account, `Demo2026!`:
-
-| Role | Email |
-| --- | --- |
-| SUPER_ADMIN | `superadmin@regops.dev` |
-| TENANT_ADMIN | `admin@demomfb.dev` |
-| VIEWER | `viewer@demomfb.dev` |
-| INVESTIGATOR | `investigator@demomfb.dev` |
-| COMPLIANCE_OFFICER | `compliance@demomfb.dev` |
-
-The mock password is deliberately different from the real seed passwords so nobody assumes one
-works against the other backend.
+`pnpm db:seed` creates the platform tenant and one Super Admin (`superadmin@regops.dev` / `SuperAdmin!2026`, overridable with `SEED_SUPER_ADMIN_EMAIL` / `SEED_SUPER_ADMIN_PASSWORD`). It refuses to run in production; use `pnpm db:bootstrap` there. Create tenants and users from the console. MFA is not enforced by default; enroll via `POST /auth/mfa/setup` then `POST /auth/mfa/enable`.
 
 ## If something looks broken, check here first
 

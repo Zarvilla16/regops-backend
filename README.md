@@ -70,16 +70,9 @@ pnpm dev                  # api on :4000, worker on :4001
 The API is now serving at http://localhost:4000 (Swagger at /docs). The frontend lives in a separate
 repo (ext-codezone-regops-frontend); point its `NEXT_PUBLIC_API_URL` at this API and add its origin to `CORS_ORIGINS`.
 
-### Seeded accounts
+### Seeded account
 
-`pnpm db:seed` creates a platform tenant (home of the super admin) and a demo tenant, "Demo MFB
-Limited", with the following accounts (override via env vars in `apps/api/.env`, see
-`.env.example`):
-
-| Role | Email | Password |
-| --- | --- | --- |
-| SUPER_ADMIN | `superadmin@regops.dev` | `SuperAdmin!2026` |
-| TENANT_ADMIN (Demo MFB Limited) | `admin@demomfb.dev` | `TenantAdmin!2026` |
+`pnpm db:seed` (local development only; refuses to run when `NODE_ENV=production`) creates the internal platform tenant and one Super Admin: `superadmin@regops.dev` / `SuperAdmin!2026` (override with `SEED_SUPER_ADMIN_EMAIL` / `SEED_SUPER_ADMIN_PASSWORD` in `apps/api/.env`). Create tenants and their users from the console as that Super Admin. In production use `pnpm db:bootstrap` instead (see `deploy/DEPLOY.md`).
 | COMPLIANCE_OFFICER (Demo MFB Limited) | `compliance@demomfb.dev` | `Compliance!2026` |
 
 MFA is not enabled on seeded accounts by default — log in, then visit `POST /auth/mfa/setup` →
@@ -99,7 +92,7 @@ pnpm test            # unit tests (no DB required)
 pnpm test:e2e        # integration tests (require docker-compose up + pnpm db:migrate)
 pnpm db:migrate      # apply pending migrations
 pnpm db:revert       # revert the last migration
-pnpm db:seed         # (re-)create the seed tenants/users above
+pnpm db:seed         # (re-)create the local-dev platform tenant and Super Admin
 ```
 
 API docs (Swagger) are served at http://localhost:4000/docs outside of production.

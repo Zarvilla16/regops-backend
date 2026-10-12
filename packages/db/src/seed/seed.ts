@@ -15,9 +15,6 @@ dotenv.config();
 
 const SUPER_ADMIN_EMAIL = process.env.SEED_SUPER_ADMIN_EMAIL ?? "superadmin@regops.dev";
 const SUPER_ADMIN_PASSWORD = process.env.SEED_SUPER_ADMIN_PASSWORD ?? "SuperAdmin!2026";
-const TENANT_ADMIN_PASSWORD = process.env.SEED_TENANT_ADMIN_PASSWORD ?? "TenantAdmin!2026";
-const COMPLIANCE_OFFICER_PASSWORD =
-  process.env.SEED_COMPLIANCE_OFFICER_PASSWORD ?? "Compliance!2026";
 
 const ARGON2_OPTIONS: argon2.Options = {
   type: argon2.argon2id,
@@ -105,6 +102,9 @@ async function seedRuleCatalog(tenantId: string): Promise<void> {
  * be set here — RLS only constrains the regops_app role used by the API.
  */
 async function seed(): Promise<void> {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("The dev seed has a default password; use `pnpm db:bootstrap` to create the first Super Admin in production.");
+  }
   await AppDataSource.initialize();
 
   const tenantRepo = AppDataSource.getRepository(TenantEntity);
@@ -145,69 +145,8 @@ async function seed(): Promise<void> {
     console.log(`Created SUPER_ADMIN: ${SUPER_ADMIN_EMAIL}`);
   }
 
-  // --- Demo tenant ---
-  let demoTenant = await tenantRepo.findOne({ where: { name: "Demo MFB Limited" } });
-  if (!demoTenant) {
-    demoTenant = await tenantRepo.save(
-      tenantRepo.create({
-        name: "Demo MFB Limited",
-        type: TenantType.MFB,
-        cbnLicenseNumber: "CBN-MFB-DEMO-0001",
-        status: TenantStatus.ACTIVE,
-      }),
-    );
-    console.log(`Created demo tenant: ${demoTenant.id}`);
-  }
-  await seedRiskFactorConfigs(demoTenant.id);
-  await seedScreeningProviderConfigs(demoTenant.id);
-  await seedRuleCatalog(demoTenant.id);
-
-  const demoTenantAdminEmail = "admin@demomfb.dev";
-  let tenantAdmin = await userRepo.findOne({
-    where: { tenantId: demoTenant.id, email: demoTenantAdminEmail },
-  });
-  if (!tenantAdmin) {
-    tenantAdmin = await userRepo.save(
-      userRepo.create({
-        tenantId: demoTenant.id,
-        email: demoTenantAdminEmail,
-        passwordHash: await hash(TENANT_ADMIN_PASSWORD),
-        fullName: "Demo Tenant Admin",
-        role: UserRole.TENANT_ADMIN,
-        status: UserStatus.ACTIVE,
-      }),
-    );
-    console.log(`Created TENANT_ADMIN: ${demoTenantAdminEmail}`);
-  }
-
-  const demoComplianceEmail = "compliance@demomfb.dev";
-  let complianceOfficer = await userRepo.findOne({
-    where: { tenantId: demoTenant.id, email: demoComplianceEmail },
-  });
-  if (!complianceOfficer) {
-    complianceOfficer = await userRepo.save(
-      userRepo.create({
-        tenantId: demoTenant.id,
-        email: demoComplianceEmail,
-        passwordHash: await hash(COMPLIANCE_OFFICER_PASSWORD),
-        fullName: "Demo Compliance Officer",
-        role: UserRole.COMPLIANCE_OFFICER,
-        status: UserStatus.ACTIVE,
-      }),
-    );
-    console.log(`Created COMPLIANCE_OFFICER: ${demoComplianceEmail}`);
-  }
-
-  console.log("\nSeed complete. Credentials:");
-  console.table([
-    { role: "SUPER_ADMIN", email: SUPER_ADMIN_EMAIL, password: SUPER_ADMIN_PASSWORD },
-    { role: "TENANT_ADMIN", email: demoTenantAdminEmail, password: TENANT_ADMIN_PASSWORD },
-    {
-      role: "COMPLIANCE_OFFICER",
-      email: demoComplianceEmail,
-      password: COMPLIANCE_OFFICER_PASSWORD,
-    },
-  ]);
+  console.log("\nSeed complete. Local development login:");
+  console.table([{ role: "SUPER_ADMIN", email: SUPER_ADMIN_EMAIL, password: SUPER_ADMIN_PASSWORD }]);
 
   await AppDataSource.destroy();
 }
