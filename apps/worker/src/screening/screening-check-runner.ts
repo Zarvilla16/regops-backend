@@ -291,9 +291,15 @@ export async function runScreeningCheck(
     }),
   );
 
+  // "Last screened" must move on every completed check, clean ones included — otherwise a customer screened clean
+  // looks never screened. (Counterparty screens have no customer row.)
+  if (customerId) {
+    await qr.manager.getRepository(CustomerEntity).update({ id: customerId }, { lastScreenedAt: check.completedAt });
+  }
+
   const matches: ScreeningMatchEntity[] = [];
   if (bandedStatus !== ScreeningResultType.CLEAN) {
-    const eligible = screeningResult.matches.filter((m) => m.matchScore >= thresholds.potentialMatchMin);
+    const eligible =screeningResult.matches.filter((m) => m.matchScore >= thresholds.potentialMatchMin);
     for (const m of eligible) {
       const saved = await matchRepo.save(
         matchRepo.create({

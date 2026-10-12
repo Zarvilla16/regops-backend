@@ -272,9 +272,15 @@ export class ScreeningService {
       }),
     );
 
+    // "Last screened" must move on every completed check, clean ones included — otherwise a customer screened clean
+    // looks never screened. (A pre-screen at onboarding has no customer row yet; attachCustomer() sets it then.)
+    if (customerId) {
+      await qr.manager.getRepository(CustomerEntity).update({ id: customerId }, { lastScreenedAt: check.completedAt });
+    }
+
     const matches: ScreeningMatchEntity[] = [];
     if (bandedStatus !== ScreeningResultType.CLEAN) {
-      const eligibleMatches = screeningResult.matches.filter((m) => m.matchScore >= thresholds.potentialMatchMin);
+      const eligibleMatches =screeningResult.matches.filter((m) => m.matchScore >= thresholds.potentialMatchMin);
       for (const m of eligibleMatches) {
         const saved = await matchRepo.save(
           matchRepo.create({
@@ -464,6 +470,8 @@ export class ScreeningService {
   async attachCustomer(qr: QueryRunner, checkId: string, customerId: string): Promise<void> {
     await qr.manager.getRepository(ScreeningCheckEntity).update({ id: checkId }, { customerId });
     await qr.manager.getRepository(ScreeningMatchEntity).update({ screeningCheckId: checkId }, { customerId });
+    // The onboarding pre-screen is this customer's first screening.
+    await qr.manager.getRepository(CustomerEntity).update({ id: customerId }, { lastScreenedAt: new Date() });
   }
 
   /** Section 5.2's "enqueue async PEP and adverse media screening" — always
