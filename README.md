@@ -70,6 +70,8 @@ pnpm dev                  # api on :4000, worker on :4001
 The API is now serving at http://localhost:4000 (Swagger at /docs). The frontend lives in a separate
 repo (ext-codezone-regops-frontend); point its `NEXT_PUBLIC_API_URL` at this API and add its origin to `CORS_ORIGINS`.
 
+Production deployment (Neon, Railway, Cloudinary, first Super Admin via `pnpm db:bootstrap`) is described in [deploy/DEPLOY.md](deploy/DEPLOY.md).
+
 ### Seeded account
 
 `pnpm db:seed` (local development only; refuses to run when `NODE_ENV=production`) creates the internal platform tenant and one Super Admin: `superadmin@regops.dev` / `SuperAdmin!2026` (override with `SEED_SUPER_ADMIN_EMAIL` / `SEED_SUPER_ADMIN_PASSWORD` in `apps/api/.env`). Create tenants and their users from the console as that Super Admin. In production use `pnpm db:bootstrap` instead (see `deploy/DEPLOY.md`).
