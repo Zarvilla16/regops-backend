@@ -20,11 +20,13 @@ With `NODE_ENV=production` the API and worker refuse to start without `CLOUDINAR
 
 One project, three services from this repo (root directory = repo root):
 
-| Service | Config file path (Settings -> Config as code) | Notes |
-|---|---|---|
-| `redis` | n/a (Redis template) | Eviction policy `noeviction` (BullMQ requirement). |
-| `api` | `/deploy/railway.api.json` | Runs `pnpm db:migrate` as a pre-deploy step. Needs a public domain. |
-| `worker` | `/deploy/railway.worker.json` | No public domain needed. |
+Railway no longer accepts config-file paths via its API, so build/start/pre-deploy commands are set directly on each service (Settings in the dashboard, or `serviceInstanceUpdate`):
+
+| Service | Build command | Start command | Pre-deploy |
+|---|---|---|---|
+| `redis` | Redis template | n/a | Eviction policy `noeviction` (BullMQ requirement). |
+| `api` | `corepack enable && pnpm install --frozen-lockfile --prod=false && pnpm turbo run build --filter=@regops/api...` | `node apps/api/dist/main.js` | `pnpm db:migrate`. Needs a public domain (target port 8080). |
+| `worker` | same, with `--filter=@regops/worker...` | `node apps/worker/dist/main.js` | none. No public domain. |
 
 | Variable | api | worker | Value |
 |---|---|---|---|
@@ -36,7 +38,7 @@ One project, three services from this repo (root directory = repo root):
 | `CORS_ORIGINS` | yes | no | Frontend origin(s), comma-separated, no trailing slash |
 | `CLOUDINARY_URL` | yes | yes | See section 2 |
 
-Do **not** set `SEED_*` or run `pnpm db:seed` in production: the current seed creates demo tenant data with fixed passwords. A first-Super-Admin bootstrap is still to be built (task B/D).
+Do **not** set `SEED_*` or run `pnpm db:seed` in production: the seed creates demo tenant data with fixed passwords. Instead create the first Super Admin once with `pnpm db:bootstrap` (needs `DATABASE_ADMIN_URL`, `BOOTSTRAP_SUPER_ADMIN_EMAIL`, `BOOTSTRAP_SUPER_ADMIN_PASSWORD` of 12+ chars, optional `BOOTSTRAP_SUPER_ADMIN_NAME`). It is idempotent and never resets an existing Super Admin.
 
 Notes baked into the code/config:
 - Build uses `--prod=false` because Railway sets `NODE_ENV=production` at build time, which would otherwise skip the dev dependencies the build needs.

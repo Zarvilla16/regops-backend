@@ -16,6 +16,7 @@
     "db:migrate": "pnpm --filter @regops/db migrate:run",
     "db:revert": "pnpm --filter @regops/db migrate:revert",
     "db:seed": "pnpm --filter @regops/db seed",
+    "db:bootstrap": "pnpm --filter @regops/db bootstrap",
     "prepare": "husky"
   },
   "devDependencies": {

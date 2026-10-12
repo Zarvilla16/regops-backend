@@ -11,7 +11,8 @@
     "migrate:run": "pnpm build && node ./node_modules/typeorm/cli.js -d dist/data-source.js migration:run",
     "migrate:revert": "pnpm build && node ./node_modules/typeorm/cli.js -d dist/data-source.js migration:revert",
     "migrate:generate": "pnpm build && node ./node_modules/typeorm/cli.js -d dist/data-source.js migration:generate",
-    "seed": "ts-node src/seed/seed.ts"
+    "seed": "ts-node src/seed/seed.ts",
+    "bootstrap": "ts-node src/seed/bootstrap.ts"
   },
   "dependencies": {
     "@regops/risk-engine": "workspace:*",
