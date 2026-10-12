@@ -1,6 +1,6 @@
-import { Injectable } from "@nestjs/common";
+import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { DataSource } from "typeorm";
+import { DataSource, QueryRunner } from "typeorm";
 import { TenantEntity } from "@regops/db";
 import { AuthUserContext, TenantStatus } from "@regops/shared";
 import { AuditService } from "../audit/audit.service";
@@ -8,6 +8,7 @@ import { RiskFactorConfigService } from "../risk/config/risk-factor-config.servi
 import { ScreeningProviderConfigService } from "../screening/providers/screening-provider-config.service";
 import { RulesService } from "../rules/rules.service";
 import { CreateTenantDto } from "./dto/create-tenant.dto";
+import { UpdateCurrentTenantDto } from "./dto/update-current-tenant.dto";
 import { RequestMeta } from "../users/users.service";
 
 @Injectable()
@@ -39,6 +40,68 @@ export class TenantsService {
 
   async findOne(id: string): Promise<TenantEntity | null> {
     return this.dataSource.getRepository(TenantEntity).findOne({ where: { id } });
+  }
+
+  /** Reads through the request's tenant-scoped connection, so RLS applies. */
+  async findCurrent(queryRunner: QueryRunner, tenantId: string): Promise<TenantEntity | null> {
+    return queryRunner.manager.getRepository(TenantEntity).findOne({ where: { id: tenantId } });
+  }
+
+  async updateCurrent(
+    queryRunner: QueryRunner,
+    tenantId: string,
+    dto: UpdateCurrentTenantDto,
+    currentUser: AuthUserContext,
+    meta: RequestMeta,
+  ) {
+    const repo = queryRunner.manager.getRepository(TenantEntity);
+    const tenant = await repo.findOne({ where: { id: tenantId } });
+    if (!tenant) {
+      throw new NotFoundException({ code: "TENANT_NOT_FOUND", message: "Tenant not found." });
+    }
+
+    const name = dto.name.trim();
+    if (!name) {
+      throw new BadRequestException({ code: "TENANT_NAME_REQUIRED", message: "Tenant name cannot be blank." });
+    }
+    if (name === tenant.name) {
+      return this.toDto(tenant);
+    }
+
+    await queryRunner.startTransaction();
+    try {
+      const before = { name: tenant.name };
+      tenant.name = name;
+      const saved = await repo.save(tenant);
+      await this.auditService.record(queryRunner, {
+        tenantId,
+        userId: currentUser.sub,
+        action: "tenant.update",
+        entityType: "tenant",
+        entityId: tenantId,
+        beforeState: before,
+        afterState: { name: saved.name },
+        ipAddress: meta.ipAddress,
+        userAgent: meta.userAgent,
+      });
+      await queryRunner.commitTransaction();
+      return this.toDto(saved);
+    } catch (err) {
+      await queryRunner.rollbackTransaction();
+      throw err;
+    }
+  }
+
+  /** null means "back to my own tenant" and needs no lookup. */
+  async validateSwitch(tenantId: string | null) {
+    if (tenantId === null) {
+      return { tenantId: null, tenant: null };
+    }
+    const tenant = await this.findOne(tenantId);
+    if (!tenant) {
+      throw new NotFoundException({ code: "TENANT_NOT_FOUND", message: "Tenant not found." });
+    }
+    return { tenantId: tenant.id, tenant: this.toDto(tenant) };
   }
 
   /**

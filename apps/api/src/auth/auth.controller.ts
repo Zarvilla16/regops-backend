@@ -4,6 +4,7 @@ import { Request } from "express";
 import { QueryRunner } from "typeorm";
 import { AuthUserContext } from "@regops/shared";
 import { CurrentQueryRunner } from "../common/decorators/current-query-runner.decorator";
+import { CurrentTenant } from "../common/decorators/current-tenant.decorator";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
 import { AuthService, RefreshPayload } from "./auth.service";
 import { LoginDto } from "./dto/login.dto";
@@ -52,8 +53,12 @@ export class AuthController {
   @Get("me")
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, TenantGuard)
-  async me(@CurrentUser() currentUser: AuthUserContext, @CurrentQueryRunner() qr: QueryRunner) {
-    return this.authService.me(currentUser, qr);
+  async me(
+    @CurrentUser() currentUser: AuthUserContext,
+    @CurrentTenant() effectiveTenantId: string,
+    @CurrentQueryRunner() qr: QueryRunner,
+  ) {
+    return this.authService.me(currentUser, qr, effectiveTenantId);
   }
 
   @Post("mfa/setup")

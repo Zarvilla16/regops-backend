@@ -1,5 +1,5 @@
 import { Type } from "class-transformer";
-import { IsInt, IsISO8601, IsOptional, IsString, IsUUID, Min } from "class-validator";
+import { IsInt, IsISO8601, IsOptional, IsString, IsUUID, Matches, MaxLength, Min } from "class-validator";
 
 /** Section 9.1's filters — comma-separated enum lists come through as plain
  * strings and are split/validated in the controller (same convention as
@@ -25,9 +25,32 @@ export class ListAlertsDto {
   @IsUUID()
   customer_id?: string;
 
+  /** A user id, or the literal "unassigned" for alerts with no assignee. */
   @IsOptional()
-  @IsUUID()
+  @Matches(/^(unassigned|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i, {
+    message: "assigned_to must be a user id or 'unassigned'",
+  })
   assigned_to?: string;
+
+  /** Console-facing aliases: comma-separated scenario types (same as scenario_type). */
+  @IsOptional()
+  @IsString()
+  scenario?: string;
+
+  /** Console-facing date range on the alert's creation date, inclusive, YYYY-MM-DD. */
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: "created_from must be YYYY-MM-DD" })
+  created_from?: string;
+
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, { message: "created_to must be YYYY-MM-DD" })
+  created_to?: string;
+
+  /** Case-insensitive substring match against the alert's customer name. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  q?: string;
 
   @IsOptional()
   @IsISO8601()

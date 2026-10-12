@@ -52,6 +52,13 @@ export class TransactionsController {
     );
   }
 
+  // Declared before "transactions/:id" so "stats" is never read as a transaction id.
+  @Get("transactions/stats")
+  @Roles(...ANY_AUTHENTICATED)
+  async stats(@CurrentTenant() tenantId: string, @CurrentQueryRunner() queryRunner: QueryRunner) {
+    return this.transactionsService.getStats(queryRunner, tenantId);
+  }
+
   @Get("transactions/:id")
   @Roles(...ANY_AUTHENTICATED)
   async detail(@CurrentTenant() tenantId: string, @CurrentQueryRunner() queryRunner: QueryRunner, @Param("id") id: string) {

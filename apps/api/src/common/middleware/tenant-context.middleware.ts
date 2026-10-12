@@ -7,6 +7,7 @@ import { AuthUserContext, UserRole } from "@regops/shared";
 
 const TENANT_OVERRIDE_HEADER = "x-tenant-override";
 const TENANT_ID_HEADER = "x-tenant-id";
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Routes an external caller can reach with no JWT at all (Backend Prompt
@@ -110,6 +111,13 @@ export class TenantContextMiddleware implements NestMiddleware {
     (req as any).user = user;
 
     const overrideHeader = req.header(TENANT_OVERRIDE_HEADER);
+    if (overrideHeader && !UUID_PATTERN.test(overrideHeader)) {
+      res.status(400).json({
+        success: false,
+        error: { code: "INVALID_TENANT_OVERRIDE", message: `${TENANT_OVERRIDE_HEADER} must be a tenant UUID.` },
+      });
+      return;
+    }
     const isSuperAdmin = user.role === UserRole.SUPER_ADMIN;
     const effectiveTenantId = isSuperAdmin && overrideHeader ? overrideHeader : user.tenantId;
     const bypassRls = isSuperAdmin && Boolean(overrideHeader);

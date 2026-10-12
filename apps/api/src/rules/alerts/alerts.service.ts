@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import { EventEmitter2 } from "@nestjs/event-emitter";
-import { QueryRunner } from "typeorm";
-import { AlertEntity, RuleEntity, TransactionEntity } from "@regops/db";
+import { In, QueryRunner } from "typeorm";
+import { AlertEntity, CustomerEntity, RuleEntity, TransactionEntity } from "@regops/db";
 import { AlertCloseCategory, AlertDto, AlertSeverity, AlertStatus, AuthUserContext, RuleScenarioType, TransactionDto } from "@regops/shared";
 import { AuditService } from "../../audit/audit.service";
 import { RequestMeta } from "../../users/users.service";
@@ -34,6 +34,35 @@ export interface AlertFilters {
   firstFiredFrom?: string;
   firstFiredTo?: string;
   minFireCount?: number;
+  /** Only alerts with no assignee (the "unassigned" sentinel on the list endpoint). */
+  unassigned?: boolean;
+  /** Inclusive YYYY-MM-DD bounds on created_at. */
+  createdFrom?: string;
+  createdTo?: string;
+  /** Case-insensitive substring of the customer's full name. */
+  customerNameQuery?: string;
+}
+
+/** List-row shape the console renders: the alert plus its customer and the money/channel of its transactions. */
+export type AlertRowDto = AlertDto & {
+  customer: { id: string; fullName: string } | null;
+  amount: number;
+  /** The shared channel of the linked transactions, "MULTIPLE" if they differ, "—" if there are none. */
+  channel: string;
+};
+
+export type AlertDetailDto = Omit<AlertRowDto, "customer"> & {
+  customer: { id: string; fullName: string; riskLevel: string; customerType: string } | null;
+  transactions: TransactionDto[];
+};
+
+const EXPORT_ROW_LIMIT = 10000;
+
+/** RFC 4180 cell: quoted when it contains a comma, quote, or newline; embedded quotes doubled. */
+function csvCell(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  const s = String(value);
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
 const SEVERITY_ORDER_SQL = `CASE severity WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END`;
@@ -125,7 +154,15 @@ export class AlertsService {
     filters: AlertFilters,
     page: number,
     limit: number,
-  ): Promise<{ data: AlertDto[]; meta: { page: number; limit: number; total: number } }> {
+  ): Promise<{ data: AlertRowDto[]; meta: { page: number; limit: number; total: number } }> {
+    const qb = this.filteredQuery(qr, tenantId, filters);
+    qb.skip((page - 1) * limit).take(limit);
+
+    const [rows, total] = await qb.getManyAndCount();
+    return { data: await this.toRowDtos(qr, tenantId, rows), meta: { page, limit, total } };
+  }
+
+  private filteredQuery(qr: QueryRunner, tenantId: string, filters: AlertFilters) {
     const qb = qr.manager.getRepository(AlertEntity).createQueryBuilder("alert").where("alert.tenant_id = :tenantId", { tenantId });
 
     if (filters.statuses?.length) qb.andWhere("alert.status IN (:...statuses)", { statuses: filters.statuses });
@@ -133,16 +170,139 @@ export class AlertsService {
     if (filters.scenarioTypes?.length) qb.andWhere("alert.scenario_type IN (:...scenarioTypes)", { scenarioTypes: filters.scenarioTypes });
     if (filters.ruleId) qb.andWhere("alert.rule_id = :ruleId", { ruleId: filters.ruleId });
     if (filters.customerId) qb.andWhere("alert.customer_id = :customerId", { customerId: filters.customerId });
-    if (filters.assignedTo) qb.andWhere("alert.assigned_to = :assignedTo", { assignedTo: filters.assignedTo });
+    if (filters.unassigned) qb.andWhere("alert.assigned_to IS NULL");
+    else if (filters.assignedTo) qb.andWhere("alert.assigned_to = :assignedTo", { assignedTo: filters.assignedTo });
     if (filters.firstFiredFrom) qb.andWhere("alert.first_fired_at >= :from", { from: filters.firstFiredFrom });
     if (filters.firstFiredTo) qb.andWhere("alert.first_fired_at <= :to", { to: filters.firstFiredTo });
     if (filters.minFireCount) qb.andWhere("alert.fire_count >= :minFireCount", { minFireCount: filters.minFireCount });
+    if (filters.createdFrom) qb.andWhere("alert.created_at >= :createdFrom::date", { createdFrom: filters.createdFrom });
+    if (filters.createdTo) qb.andWhere("alert.created_at < (:createdTo::date + interval '1 day')", { createdTo: filters.createdTo });
+    if (filters.customerNameQuery?.trim()) {
+      const escaped = filters.customerNameQuery.trim().replace(/[\\%_]/g, (c) => `\\${c}`);
+      qb.andWhere(
+        "alert.customer_id IN (SELECT c.id FROM customer c WHERE c.tenant_id = :tenantId AND c.full_name ILIKE :nameQuery)",
+        { nameQuery: `%${escaped}%` },
+      );
+    }
 
     qb.orderBy(SEVERITY_ORDER_SQL, "DESC").addOrderBy("alert.first_fired_at", "DESC");
-    qb.skip((page - 1) * limit).take(limit);
+    return qb;
+  }
 
-    const [rows, total] = await qb.getManyAndCount();
-    return { data: rows.map((r) => this.toDto(r)), meta: { page, limit, total } };
+  /** Loads the customers and linked transactions for a set of alerts in two queries (not per alert). */
+  private async loadRelations(qr: QueryRunner, tenantId: string, alerts: AlertEntity[]) {
+    const customerIds = [...new Set(alerts.map((a) => a.customerId))];
+    const customers = customerIds.length
+      ? await qr.manager.getRepository(CustomerEntity).find({ where: { tenantId, id: In(customerIds) }, withDeleted: true })
+      : [];
+
+    const txIdsByAlert = new Map<string, string[]>();
+    const allTxIds = new Set<string>();
+    for (const alert of alerts) {
+      const related = Array.isArray(alert.evidence?.relatedTransactionIds) ? (alert.evidence.relatedTransactionIds as string[]) : [];
+      const ids = [...new Set([...related, ...(alert.triggeringTransactionId ? [alert.triggeringTransactionId] : [])])];
+      txIdsByAlert.set(alert.id, ids);
+      ids.forEach((id) => allTxIds.add(id));
+    }
+    const transactions = allTxIds.size
+      ? await qr.manager
+          .getRepository(TransactionEntity)
+          .createQueryBuilder("t")
+          .where("t.tenant_id = :tenantId", { tenantId })
+          .andWhere("t.id IN (:...ids)", { ids: [...allTxIds] })
+          .getMany()
+      : [];
+
+    return {
+      customerById: new Map(customers.map((c) => [c.id, c])),
+      transactionById: new Map(transactions.map((t) => [t.id, t])),
+      txIdsByAlert,
+    };
+  }
+
+  private summariseTransactions(txs: TransactionEntity[]): { amount: number; channel: string } {
+    const channels = new Set(txs.map((t) => t.channel));
+    return {
+      amount: txs.reduce((sum, t) => sum + Number(t.amount), 0),
+      channel: txs.length === 0 ? "—" : channels.size === 1 ? [...channels][0] : "MULTIPLE",
+    };
+  }
+
+  private async toRowDtos(qr: QueryRunner, tenantId: string, alerts: AlertEntity[]): Promise<AlertRowDto[]> {
+    if (alerts.length === 0) return [];
+    const { customerById, transactionById, txIdsByAlert } = await this.loadRelations(qr, tenantId, alerts);
+    return alerts.map((alert) => {
+      const customer = customerById.get(alert.customerId);
+      const txs = (txIdsByAlert.get(alert.id) ?? []).map((id) => transactionById.get(id)).filter((t): t is TransactionEntity => Boolean(t));
+      return {
+        ...this.toDto(alert),
+        customer: customer ? { id: customer.id, fullName: customer.fullName } : null,
+        ...this.summariseTransactions(txs),
+      };
+    });
+  }
+
+  /** Detail view: the row shape plus a fuller customer summary and the linked transactions in full. */
+  async findDetail(qr: QueryRunner, tenantId: string, id: string): Promise<AlertDetailDto> {
+    const alert = await this.findOne(qr, tenantId, id);
+    const { customerById, transactionById, txIdsByAlert } = await this.loadRelations(qr, tenantId, [alert]);
+    const customer = customerById.get(alert.customerId);
+    const txs = (txIdsByAlert.get(alert.id) ?? []).map((txId) => transactionById.get(txId)).filter((t): t is TransactionEntity => Boolean(t));
+    return {
+      ...this.toDto(alert),
+      customer: customer ? { id: customer.id, fullName: customer.fullName, riskLevel: customer.riskLevel, customerType: customer.customerType } : null,
+      ...this.summariseTransactions(txs),
+      transactions: txs.map((t) => this.toTransactionDto(t)),
+    };
+  }
+
+  /** Same filters as the list, no pagination (capped), as a CSV document. */
+  async exportCsv(qr: QueryRunner, tenantId: string, filters: AlertFilters): Promise<{ csv: string; count: number }> {
+    const qb = this.filteredQuery(qr, tenantId, filters);
+    qb.take(EXPORT_ROW_LIMIT);
+    const rows = await this.toRowDtos(qr, tenantId, await qb.getMany());
+
+    const columns: [string, (r: AlertRowDto) => unknown][] = [
+      ["id", (r) => r.id],
+      ["scenario", (r) => r.scenarioType],
+      ["title", (r) => r.title],
+      ["customer_name", (r) => r.customer?.fullName ?? ""],
+      ["severity", (r) => r.severity],
+      ["status", (r) => r.status],
+      ["amount", (r) => r.amount],
+      ["channel", (r) => r.channel],
+      ["assigned_to", (r) => r.assignedTo ?? ""],
+      ["close_category", (r) => r.closeCategory ?? ""],
+      ["created_at", (r) => r.createdAt],
+      ["closed_at", (r) => r.closedAt ?? ""],
+    ];
+    const lines = [columns.map(([header]) => header).join(",")];
+    for (const row of rows) lines.push(columns.map(([, get]) => csvCell(get(row))).join(","));
+    return { csv: lines.join("\n"), count: rows.length };
+  }
+
+  /**
+   * Assigns many alerts at once, each through the single-alert path so every one gets its own audit entry and
+   * status event. Alerts that are missing (or in another tenant) or already closed are skipped, not fatal.
+   */
+  async bulkAssign(
+    qr: QueryRunner,
+    tenantId: string,
+    ids: string[],
+    assignedTo: string,
+    currentUser: AuthUserContext,
+    meta: RequestMeta,
+  ): Promise<{ updated: number; total: number }> {
+    let updated = 0;
+    for (const id of ids) {
+      try {
+        await this.assign(qr, tenantId, id, assignedTo, currentUser, meta);
+        updated += 1;
+      } catch (err) {
+        if (!(err instanceof NotFoundException) && !(err instanceof BadRequestException)) throw err;
+      }
+    }
+    return { updated, total: ids.length };
   }
 
   async findOne(qr: QueryRunner, tenantId: string, id: string): Promise<AlertEntity> {
@@ -241,19 +401,8 @@ export class AlertsService {
     return this.toDto(saved);
   }
 
-  async relatedTransactions(qr: QueryRunner, tenantId: string, id: string): Promise<TransactionDto[]> {
-    const alert = await this.findOne(qr, tenantId, id);
-    const ids = Array.isArray(alert.evidence.relatedTransactionIds) ? (alert.evidence.relatedTransactionIds as string[]) : [];
-    if (ids.length === 0) return [];
-
-    const rows = await qr.manager
-      .getRepository(TransactionEntity)
-      .createQueryBuilder("t")
-      .where("t.tenant_id = :tenantId", { tenantId })
-      .andWhere("t.id IN (:...ids)", { ids })
-      .getMany();
-
-    return rows.map((t) => ({
+  private toTransactionDto(t: TransactionEntity): TransactionDto {
+    return {
       id: t.id,
       tenantId: t.tenantId,
       cbsTransactionId: t.cbsTransactionId,
@@ -274,7 +423,22 @@ export class AlertsService {
       ingestedAt: t.ingestedAt.toISOString(),
       source: t.source,
       ingestionBatchId: t.ingestionBatchId,
-    }));
+    };
+  }
+
+  async relatedTransactions(qr: QueryRunner, tenantId: string, id: string): Promise<TransactionDto[]> {
+    const alert = await this.findOne(qr, tenantId, id);
+    const ids = Array.isArray(alert.evidence.relatedTransactionIds) ? (alert.evidence.relatedTransactionIds as string[]) : [];
+    if (ids.length === 0) return [];
+
+    const rows = await qr.manager
+      .getRepository(TransactionEntity)
+      .createQueryBuilder("t")
+      .where("t.tenant_id = :tenantId", { tenantId })
+      .andWhere("t.id IN (:...ids)", { ids })
+      .getMany();
+
+    return rows.map((t) => this.toTransactionDto(t));
   }
 
   toDto(alert: AlertEntity): AlertDto {

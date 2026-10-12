@@ -401,7 +401,11 @@ export class AuthService {
       .execute();
   }
 
-  async me(currentUser: AuthUserContext, queryRunner: QueryRunner) {
+  /**
+   * `tenant` is the tenant the request is scoped to — the user's own, or, for a Super Admin sending
+   * X-Tenant-Override, the one they are acting as (`isActingAsTenant`). `user` is always the real caller.
+   */
+  async me(currentUser: AuthUserContext, queryRunner: QueryRunner, effectiveTenantId: string = currentUser.tenantId) {
     const user = await queryRunner.manager
       .getRepository(UserEntity)
       .findOne({ where: { id: currentUser.sub, tenantId: currentUser.tenantId } });
@@ -411,9 +415,13 @@ export class AuthService {
 
     const tenant = await queryRunner.manager
       .getRepository(TenantEntity)
-      .findOne({ where: { id: user.tenantId } });
+      .findOne({ where: { id: effectiveTenantId } });
 
-    return { user: this.toUserDto(user), tenant: tenant ? { id: tenant.id, name: tenant.name } : null };
+    return {
+      user: this.toUserDto(user),
+      tenant: tenant ? { id: tenant.id, name: tenant.name } : null,
+      isActingAsTenant: effectiveTenantId !== user.tenantId,
+    };
   }
 
   async mfaSetup(currentUser: AuthUserContext, queryRunner: QueryRunner) {
