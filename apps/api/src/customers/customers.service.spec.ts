@@ -182,6 +182,16 @@ function makeService() {
 }
 
 describe("CustomersService", () => {
+  describe("toDto — dateOfBirth", () => {
+    it("serialises a Date and the 'YYYY-MM-DD' string the pg driver returns for date columns", () => {
+      const { service } = makeService();
+      const asDate = service.toDto(makeCustomer({ dateOfBirth: new Date("1990-05-01T00:00:00Z") }));
+      const asString = service.toDto(makeCustomer({ dateOfBirth: "1990-05-01" as unknown as Date }));
+      expect(asDate.dateOfBirth).toBe("1990-05-01");
+      expect(asString.dateOfBirth).toBe("1990-05-01");
+    });
+  });
+
   describe("create — PEP-onboarding-requires-approval gate", () => {
     it("rejects a PEP customerType with no pepDetails, before ever calling the screening provider", async () => {
       const { service, screeningService } = makeService();

@@ -77,7 +77,10 @@ export class CustomersService {
       fullName: customer.fullName,
       email: customer.email,
       phone: customer.phone,
-      dateOfBirth: customer.dateOfBirth ? customer.dateOfBirth.toISOString().slice(0, 10) : null,
+      // `date` columns are hydrated as "YYYY-MM-DD" strings by the pg driver, despite the entity's Date typing.
+      dateOfBirth: customer.dateOfBirth
+        ? (customer.dateOfBirth instanceof Date ? customer.dateOfBirth.toISOString() : String(customer.dateOfBirth)).slice(0, 10)
+        : null,
       customerType: customer.customerType,
       occupation: customer.occupation,
       country: customer.country,
