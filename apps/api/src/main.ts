@@ -6,6 +6,7 @@ import { NestExpressApplication } from "@nestjs/platform-express";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import helmet from "helmet";
 import { AppModule } from "./app.module";
+import { initSentry } from "./common/observability/sentry";
 
 export function configureApp(app: INestApplication): void {
   app.useGlobalPipes(
@@ -37,6 +38,7 @@ async function bootstrap(): Promise<void> {
   // req.body) for every request — needed by WebhookSignatureGuard to verify
   // an HMAC computed over the exact bytes the sender signed (Backend Prompt
   // 4, Section 6.2); every other route's body handling is unaffected.
+  initSentry("regops-api");
   const app = await NestFactory.create(AppModule, { rawBody: true });
   configureApp(app);
 

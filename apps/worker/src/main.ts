@@ -30,8 +30,10 @@ import { processRescreenJob } from "./screening/rescreen-job.processor";
 import { processTransactionIngestionJob } from "./transactions/ingestion-processor";
 import { pollSftpInboxes } from "./transactions/sftp-polling";
 import { evaluateTransaction } from "./rules/evaluate-rules.processor";
+import { captureJobFailure, initSentry } from "./observability/sentry";
 
 dotenv.config();
+initSentry("regops-worker");
 
 const REDIS_URL = process.env.REDIS_URL ?? "redis://127.0.0.1:6379";
 const PORT = Number(process.env.PORT ?? 4001);
@@ -196,6 +198,7 @@ async function bootstrap(): Promise<void> {
     });
     worker.on("failed", (job, err) => {
       console.error(`[worker] job ${job?.name} failed:`, err);
+      captureJobFailure(err, { name: job?.name, queueName: job?.queueName, id: job?.id });
     });
   }
 

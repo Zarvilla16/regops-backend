@@ -27,6 +27,7 @@ import { TransactionsModule } from "./transactions/transactions.module";
 import { RulesModule } from "./rules/rules.module";
 import { CasesModule } from "./cases/cases.module";
 import { ReportsModule } from "./reports/reports.module";
+import { HealthModule } from "./health/health.module";
 
 @Module({
   imports: [
@@ -63,6 +64,7 @@ import { ReportsModule } from "./reports/reports.module";
     RulesModule,
     CasesModule,
     ReportsModule,
+    HealthModule,
   ],
   providers: [
     TenantContextMiddleware,

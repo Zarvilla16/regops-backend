@@ -30,6 +30,7 @@
     "@regops/rules-engine": "workspace:*",
     "@regops/screening-engine": "workspace:*",
     "@regops/shared": "workspace:*",
+    "@sentry/node": "^11.8.0",
     "argon2": "^0.41.1",
     "bullmq": "^5.79.2",
     "class-transformer": "^0.5.1",

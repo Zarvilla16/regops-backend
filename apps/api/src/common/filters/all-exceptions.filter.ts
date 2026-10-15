@@ -8,6 +8,7 @@ import {
 } from "@nestjs/common";
 import { Response } from "express";
 import { ApiErrorResponse } from "@regops/shared";
+import { captureUnexpected } from "../observability/sentry";
 
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
@@ -28,6 +29,12 @@ export class AllExceptionsFilter implements ExceptionFilter {
     this.logger.error(
       exception instanceof Error ? exception.stack : String(exception),
     );
+    const request = host.switchToHttp().getRequest<{ user?: { sub?: string; tenantId?: string }; route?: { path?: string } }>();
+    captureUnexpected(exception, {
+      userId: request?.user?.sub,
+      tenantId: request?.user?.tenantId,
+      route: request?.route?.path,
+    });
     response.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
       success: false,
       error: {
