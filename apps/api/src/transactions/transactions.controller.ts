@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, UseGuards } from "@nestjs/common";
+import { Controller, Get, Param, ParseUUIDPipe, Query, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { QueryRunner } from "typeorm";
 import { TransactionChannel, UserRole } from "@regops/shared";
@@ -61,7 +61,7 @@ export class TransactionsController {
 
   @Get("transactions/:id")
   @Roles(...ANY_AUTHENTICATED)
-  async detail(@CurrentTenant() tenantId: string, @CurrentQueryRunner() queryRunner: QueryRunner, @Param("id") id: string) {
+  async detail(@CurrentTenant() tenantId: string, @CurrentQueryRunner() queryRunner: QueryRunner, @Param("id", ParseUUIDPipe) id: string) {
     return this.transactionsService.findById(queryRunner, tenantId, id);
   }
 
@@ -70,7 +70,7 @@ export class TransactionsController {
   async forCustomer(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() queryRunner: QueryRunner,
-    @Param("id") customerId: string,
+    @Param("id", ParseUUIDPipe) customerId: string,
     @Query() query: ListTransactionsDto,
   ) {
     return this.transactionsService.findAll(
@@ -87,7 +87,7 @@ export class TransactionsController {
   async velocityStats(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() queryRunner: QueryRunner,
-    @Param("id") customerId: string,
+    @Param("id", ParseUUIDPipe) customerId: string,
   ) {
     return this.transactionsService.getVelocityStats(queryRunner, tenantId, customerId);
   }

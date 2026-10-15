@@ -1,4 +1,4 @@
-import { Controller, Get, NotFoundException, Param, Query, Res, UseGuards } from "@nestjs/common";
+import { Controller, Get, NotFoundException, Param, ParseUUIDPipe, Query, Res, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { Response } from "express";
 import * as path from "path";
@@ -37,7 +37,7 @@ export class BatchesController {
 
   @Get(":id")
   @Roles(...COMPLIANCE_OFFICER_PLUS)
-  async detail(@CurrentTenant() tenantId: string, @CurrentQueryRunner() queryRunner: QueryRunner, @Param("id") id: string) {
+  async detail(@CurrentTenant() tenantId: string, @CurrentQueryRunner() queryRunner: QueryRunner, @Param("id", ParseUUIDPipe) id: string) {
     const batch = await this.ingestionBatchService.findById(queryRunner, tenantId, id);
     return this.ingestionBatchService.toDto(batch);
   }
@@ -47,7 +47,7 @@ export class BatchesController {
   async errors(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() queryRunner: QueryRunner,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Res() res: Response,
   ) {
     const batch = await this.ingestionBatchService.findById(queryRunner, tenantId, id);

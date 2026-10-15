@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, Req, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { Request } from "express";
 import { QueryRunner } from "typeorm";
@@ -45,7 +45,7 @@ export class MatchReviewController {
 
   @Get(":id")
   @Roles(...COMPLIANCE_OFFICER_PLUS)
-  async detail(@CurrentTenant() tenantId: string, @CurrentQueryRunner() queryRunner: QueryRunner, @Param("id") id: string) {
+  async detail(@CurrentTenant() tenantId: string, @CurrentQueryRunner() queryRunner: QueryRunner, @Param("id", ParseUUIDPipe) id: string) {
     return this.matchReviewService.findMatchById(queryRunner, tenantId, id);
   }
 
@@ -55,7 +55,7 @@ export class MatchReviewController {
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() queryRunner: QueryRunner,
     @CurrentUser() currentUser: AuthUserContext,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Body() dto: ReviewMatchDto,
     @Req() req: Request,
   ) {

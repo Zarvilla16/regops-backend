@@ -4,6 +4,7 @@ import {
   Controller,
   Get,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Query,
@@ -91,13 +92,13 @@ export class CasesController {
 
   @Get(":id")
   @Roles(...ANY_AUTHENTICATED)
-  async detail(@CurrentTenant() tenantId: string, @CurrentQueryRunner() qr: QueryRunner, @Param("id") id: string) {
+  async detail(@CurrentTenant() tenantId: string, @CurrentQueryRunner() qr: QueryRunner, @Param("id", ParseUUIDPipe) id: string) {
     return this.casesService.toDetail(qr, tenantId, id);
   }
 
   @Get(":id/checklist")
   @Roles(...ANY_AUTHENTICATED)
-  async checklist(@CurrentTenant() tenantId: string, @CurrentQueryRunner() qr: QueryRunner, @Param("id") id: string) {
+  async checklist(@CurrentTenant() tenantId: string, @CurrentQueryRunner() qr: QueryRunner, @Param("id", ParseUUIDPipe) id: string) {
     return this.casesService.computeChecklist(qr, tenantId, id);
   }
 
@@ -106,7 +107,7 @@ export class CasesController {
   async linkAlert(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() qr: QueryRunner,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Body() dto: LinkAlertDto,
     @CurrentUser() currentUser: AuthUserContext,
     @Req() req: Request,
@@ -119,7 +120,7 @@ export class CasesController {
   async addNote(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() qr: QueryRunner,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Body() dto: AddNoteDto,
     @CurrentUser() currentUser: AuthUserContext,
     @Req() req: Request,
@@ -134,7 +135,7 @@ export class CasesController {
   async uploadEvidence(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() qr: QueryRunner,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @UploadedFile() file: Express.Multer.File,
     @CurrentUser() currentUser: AuthUserContext,
     @Req() req: Request,
@@ -150,8 +151,8 @@ export class CasesController {
   async downloadEvidence(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() qr: QueryRunner,
-    @Param("id") id: string,
-    @Param("evidenceId") evidenceId: string,
+    @Param("id", ParseUUIDPipe) id: string,
+    @Param("evidenceId", ParseUUIDPipe) evidenceId: string,
     @CurrentUser() currentUser: AuthUserContext,
     @Req() req: Request,
     @Res() res: Response,
@@ -167,7 +168,7 @@ export class CasesController {
   async close(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() qr: QueryRunner,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Body() dto: CloseCaseDto,
     @CurrentUser() currentUser: AuthUserContext,
     @Req() req: Request,
@@ -180,7 +181,7 @@ export class CasesController {
   async submit(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() qr: QueryRunner,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Body() dto: SubmitCaseDto,
     @CurrentUser() currentUser: AuthUserContext,
     @Req() req: Request,
@@ -193,7 +194,7 @@ export class CasesController {
   async approve(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() qr: QueryRunner,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @CurrentUser() currentUser: AuthUserContext,
     @Req() req: Request,
   ) {
@@ -205,7 +206,7 @@ export class CasesController {
   async reject(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() qr: QueryRunner,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Body() dto: RejectCaseDto,
     @CurrentUser() currentUser: AuthUserContext,
     @Req() req: Request,
@@ -218,7 +219,7 @@ export class CasesController {
   async assign(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() qr: QueryRunner,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Body() dto: AssignCaseDto,
     @CurrentUser() currentUser: AuthUserContext,
     @Req() req: Request,

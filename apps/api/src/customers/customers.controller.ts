@@ -7,6 +7,7 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Query,
@@ -78,7 +79,7 @@ export class CustomersController {
   async findOne(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() queryRunner: QueryRunner,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
   ) {
     return this.customersService.findOne(queryRunner, tenantId, id);
   }
@@ -89,7 +90,7 @@ export class CustomersController {
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() queryRunner: QueryRunner,
     @CurrentUser() currentUser: AuthUserContext,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Query("reason") reason: string | undefined,
     @Req() req: Request,
   ) {
@@ -119,7 +120,7 @@ export class CustomersController {
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() queryRunner: QueryRunner,
     @CurrentUser() currentUser: AuthUserContext,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Body() dto: UpdateCustomerDto,
     @Req() req: Request,
   ) {
@@ -133,7 +134,7 @@ export class CustomersController {
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() queryRunner: QueryRunner,
     @CurrentUser() currentUser: AuthUserContext,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Query("reason") reason: string | undefined,
     @Req() req: Request,
   ) {
@@ -150,7 +151,7 @@ export class CustomersController {
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() queryRunner: QueryRunner,
     @CurrentUser() currentUser: AuthUserContext,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Req() req: Request,
   ) {
     return this.customersService.approvePep(queryRunner, tenantId, id, currentUser, requestMeta(req));
@@ -172,7 +173,7 @@ export class CustomersController {
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() queryRunner: QueryRunner,
     @CurrentUser() currentUser: AuthUserContext,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @UploadedFile() file: Express.Multer.File,
     @Req() req: Request,
   ) {
@@ -186,7 +187,7 @@ export class CustomersController {
   async getPhoto(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() queryRunner: QueryRunner,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Res() res: Response,
   ) {
     const { stream, contentType } = await this.customersService.getPhotoStream(queryRunner, tenantId, id);
@@ -201,7 +202,7 @@ export class CustomersController {
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() queryRunner: QueryRunner,
     @CurrentUser() currentUser: AuthUserContext,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Req() req: Request,
   ) {
     await this.customersService.deletePhoto(queryRunner, tenantId, id, currentUser, requestMeta(req));

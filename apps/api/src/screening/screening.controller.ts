@@ -1,4 +1,4 @@
-import { Body, Controller, Get, NotFoundException, Param, Post, Put, Query, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, NotFoundException, Param, ParseUUIDPipe, Post, Put, Query, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { QueryRunner } from "typeorm";
 import { CustomerEntity, TenantEntity } from "@regops/db";
@@ -37,7 +37,7 @@ export class ScreeningController {
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() queryRunner: QueryRunner,
     @CurrentUser() currentUser: AuthUserContext,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
   ) {
     const customer = await queryRunner.manager.getRepository(CustomerEntity).findOne({ where: { tenantId, id } });
     if (!customer) {
@@ -60,7 +60,7 @@ export class ScreeningController {
   async manualScreen(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() queryRunner: QueryRunner,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Body() dto: ManualScreenDto,
   ) {
     const customer = await queryRunner.manager.getRepository(CustomerEntity).findOne({ where: { tenantId, id } });
@@ -95,7 +95,7 @@ export class ScreeningController {
 
   @Get("checks/:id")
   @Roles(...COMPLIANCE_OFFICER_PLUS)
-  async checkDetail(@CurrentTenant() tenantId: string, @CurrentQueryRunner() queryRunner: QueryRunner, @Param("id") id: string) {
+  async checkDetail(@CurrentTenant() tenantId: string, @CurrentQueryRunner() queryRunner: QueryRunner, @Param("id", ParseUUIDPipe) id: string) {
     return this.screeningService.findCheckById(queryRunner, tenantId, id);
   }
 

@@ -1,4 +1,4 @@
-import { Controller, Get, NotFoundException, Param, Post, Query, UseGuards } from "@nestjs/common";
+import { Controller, Get, NotFoundException, Param, ParseUUIDPipe, Post, Query, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { QueryRunner } from "typeorm";
 import { CustomerEntity } from "@regops/db";
@@ -25,7 +25,7 @@ export class RiskController {
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() queryRunner: QueryRunner,
     @CurrentUser() currentUser: AuthUserContext,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
   ) {
     const customer = await queryRunner.manager.getRepository(CustomerEntity).findOne({ where: { tenantId, id } });
     if (!customer) {
@@ -38,7 +38,7 @@ export class RiskController {
   async riskHistory(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() queryRunner: QueryRunner,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Query("page") page?: string,
     @Query("limit") limit?: string,
   ) {

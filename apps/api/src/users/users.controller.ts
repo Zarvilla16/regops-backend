@@ -1,4 +1,4 @@
-import { Body, Controller, Get, NotFoundException, Param, Patch, Post, Req, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, NotFoundException, Param, ParseUUIDPipe, Patch, Post, Req, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { Request } from "express";
 import { QueryRunner } from "typeorm";
@@ -33,7 +33,7 @@ export class UsersController {
   async findOne(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() queryRunner: QueryRunner,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
   ) {
     const user = await this.usersService.findOneForTenant(queryRunner, tenantId, id);
     if (!user) {
@@ -64,7 +64,7 @@ export class UsersController {
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() queryRunner: QueryRunner,
     @CurrentUser() currentUser: AuthUserContext,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Req() req: Request,
   ) {
     return this.usersService.resendInvite(queryRunner, tenantId, id, currentUser, {
@@ -80,7 +80,7 @@ export class UsersController {
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() queryRunner: QueryRunner,
     @CurrentUser() currentUser: AuthUserContext,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Body() dto: UpdateUserDto,
     @Req() req: Request,
   ) {

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Param, Patch, Post, Req, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Headers, Param, ParseUUIDPipe, Patch, Post, Req, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { Request } from "express";
 import { QueryRunner } from "typeorm";
@@ -38,13 +38,13 @@ export class RulesController {
   // documented on TransactionsModule's BatchesController).
   @Get("replays/:replayId")
   @Roles(...COMPLIANCE_OFFICER_PLUS)
-  async replayStatus(@CurrentTenant() tenantId: string, @CurrentQueryRunner() qr: QueryRunner, @Param("replayId") replayId: string) {
+  async replayStatus(@CurrentTenant() tenantId: string, @CurrentQueryRunner() qr: QueryRunner, @Param("replayId", ParseUUIDPipe) replayId: string) {
     return this.ruleReplayService.findById(qr, tenantId, replayId);
   }
 
   @Get(":id")
   @Roles(...COMPLIANCE_OFFICER_PLUS)
-  async detail(@CurrentTenant() tenantId: string, @CurrentQueryRunner() qr: QueryRunner, @Param("id") id: string) {
+  async detail(@CurrentTenant() tenantId: string, @CurrentQueryRunner() qr: QueryRunner, @Param("id", ParseUUIDPipe) id: string) {
     return this.rulesService.findOne(qr, tenantId, id);
   }
 
@@ -53,7 +53,7 @@ export class RulesController {
   async update(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() qr: QueryRunner,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Body() dto: UpdateRuleDto,
     @Headers("x-confirm-loosening") confirmLoosening: string | undefined,
     @CurrentUser() currentUser: AuthUserContext,
@@ -70,7 +70,7 @@ export class RulesController {
   async test(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() qr: QueryRunner,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Body() dto: TestRuleDto,
   ) {
     return this.rulesService.testRule(qr, tenantId, id, dto.transactionId);

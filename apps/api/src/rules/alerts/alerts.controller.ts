@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query, Req, UseGuards } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { Request } from "express";
 import { QueryRunner } from "typeorm";
@@ -80,13 +80,13 @@ export class AlertsController {
 
   @Get(":id")
   @Roles(...ANY_AUTHENTICATED)
-  async detail(@CurrentTenant() tenantId: string, @CurrentQueryRunner() qr: QueryRunner, @Param("id") id: string) {
+  async detail(@CurrentTenant() tenantId: string, @CurrentQueryRunner() qr: QueryRunner, @Param("id", ParseUUIDPipe) id: string) {
     return this.alertsService.findDetail(qr, tenantId, id);
   }
 
   @Get(":id/related-transactions")
   @Roles(...ANY_AUTHENTICATED)
-  async relatedTransactions(@CurrentTenant() tenantId: string, @CurrentQueryRunner() qr: QueryRunner, @Param("id") id: string) {
+  async relatedTransactions(@CurrentTenant() tenantId: string, @CurrentQueryRunner() qr: QueryRunner, @Param("id", ParseUUIDPipe) id: string) {
     return this.alertsService.relatedTransactions(qr, tenantId, id);
   }
 
@@ -95,7 +95,7 @@ export class AlertsController {
   async assign(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() qr: QueryRunner,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Body() dto: AssignAlertDto,
     @CurrentUser() currentUser: AuthUserContext,
     @Req() req: Request,
@@ -111,7 +111,7 @@ export class AlertsController {
   async close(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() qr: QueryRunner,
-    @Param("id") id: string,
+    @Param("id", ParseUUIDPipe) id: string,
     @Body() dto: CloseAlertDto,
     @CurrentUser() currentUser: AuthUserContext,
     @Req() req: Request,

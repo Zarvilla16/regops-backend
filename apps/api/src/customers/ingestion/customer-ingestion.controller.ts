@@ -4,6 +4,7 @@ import {
   Controller,
   Get,
   Param,
+  ParseUUIDPipe,
   Post,
   Res,
   UploadedFile,
@@ -62,12 +63,12 @@ export class CustomerIngestionController {
   }
 
   @Get(":jobId")
-  async status(@CurrentTenant() tenantId: string, @Param("jobId") jobId: string) {
+  async status(@CurrentTenant() tenantId: string, @Param("jobId", ParseUUIDPipe) jobId: string) {
     return this.ingestionService.getStatus(tenantId, jobId);
   }
 
   @Get(":jobId/error-report")
-  async errorReport(@CurrentTenant() tenantId: string, @Param("jobId") jobId: string, @Res() res: Response) {
+  async errorReport(@CurrentTenant() tenantId: string, @Param("jobId", ParseUUIDPipe) jobId: string, @Res() res: Response) {
     const stream = await this.ingestionService.getErrorReportStream(tenantId, jobId);
     res.setHeader("content-type", "text/csv");
     res.setHeader("content-disposition", `attachment; filename="ingestion-${jobId}-errors.csv"`);
