@@ -105,6 +105,43 @@ export class TenantsService {
   }
 
   /**
+   * Validates the tenant and records, in that tenant's own audit log, that a Super Admin started acting as it.
+   * Switching back (null) is not logged: the server keeps no record of which tenant is being left.
+   */
+  async switchTo(tenantId: string | null, currentUser: AuthUserContext, meta: RequestMeta) {
+    const result = await this.validateSwitch(tenantId);
+    if (result.tenantId === null) return result;
+
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    try {
+      await queryRunner.startTransaction();
+      // Same pattern as create(): the audit row belongs to the target tenant, and only a Super Admin reaches here.
+      await queryRunner.query(
+        `SELECT set_config('app.current_tenant_id', $1, true), set_config('app.bypass_rls', 'true', true)`,
+        [result.tenantId],
+      );
+      await this.auditService.record(queryRunner, {
+        tenantId: result.tenantId,
+        userId: currentUser.sub,
+        action: "tenant.switch",
+        entityType: "tenant",
+        entityId: result.tenantId,
+        afterState: { tenantName: result.tenant?.name ?? null },
+        ipAddress: meta.ipAddress,
+        userAgent: meta.userAgent,
+      });
+      await queryRunner.commitTransaction();
+    } catch (err) {
+      await queryRunner.rollbackTransaction();
+      throw err;
+    } finally {
+      await queryRunner.release();
+    }
+    return result;
+  }
+
+  /**
    * Tenant creation happens before the tenant itself exists, so there is no
    * pre-established per-request tenant context to reuse (unlike users,
    * which are created within their own tenant's RLS context). This method

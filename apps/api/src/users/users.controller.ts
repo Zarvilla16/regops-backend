@@ -23,13 +23,26 @@ import type { AuthUserContext } from "@regops/shared";
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
+  /**
+   * Names only, for every signed-in role: screens across the console turn ids (assignees, authors, actors) into names.
+   * Deliberately omits email, MFA state and sign-in times, which only admins may read through GET /users.
+   * Declared before ":id" so "directory" is never parsed as a user id.
+   */
+  @Get("directory")
+  async directory(@CurrentTenant() tenantId: string, @CurrentQueryRunner() queryRunner: QueryRunner) {
+    const users = await this.usersService.findAllForTenant(queryRunner, tenantId);
+    return users.map((u) => ({ id: u.id, fullName: u.fullName, role: u.role, status: u.status }));
+  }
+
   @Get()
+  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN)
   async list(@CurrentTenant() tenantId: string, @CurrentQueryRunner() queryRunner: QueryRunner) {
     const users = await this.usersService.findAllForTenant(queryRunner, tenantId);
     return users.map((u) => this.usersService.toDto(u));
   }
 
   @Get(":id")
+  @Roles(UserRole.SUPER_ADMIN, UserRole.TENANT_ADMIN)
   async findOne(
     @CurrentTenant() tenantId: string,
     @CurrentQueryRunner() queryRunner: QueryRunner,

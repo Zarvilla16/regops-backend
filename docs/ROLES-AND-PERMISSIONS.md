@@ -67,12 +67,10 @@ it chooses to act as.
 | Download regulator XML | Yes | Yes | Yes | — | — |
 | Download report PDF or CSV | Yes | Yes | Yes | Yes | Yes |
 | View the audit log | Yes | Yes | Yes | — | — |
-| List, invite, edit and suspend users | Yes | Yes | See note | See note | See note |
+| List, invite, edit and suspend users | Yes | Yes | — | — | — |
+| See colleagues' names (no email or sign-in details) | Yes | Yes | Yes | Yes | Yes |
 | Rename the current tenant | Yes | Yes | — | — | — |
 | List, create or switch between tenants | Yes | — | — | — | — |
-
-Note on users: today the user list and user detail endpoints are readable by every signed-in role in the tenant, although
-only Super Admin and Tenant Admin can invite, edit or suspend. See section 7.
 
 ## 4. Endpoint reference
 
@@ -216,8 +214,9 @@ shared secret; **Any signed-in role** needs a valid sign-in but no particular ro
 
 | Method and path | What it does | Access |
 |---|---|---|
-| `GET /users` | List the tenant's users | Any signed-in role |
-| `GET /users/:id` | User detail | Any signed-in role |
+| `GET /users/directory` | Names only (id, name, role, status) so screens can show who did what | Any signed-in role |
+| `GET /users` | List the tenant's users with email and sign-in details | Super Admin, Tenant Admin |
+| `GET /users/:id` | User detail | Super Admin, Tenant Admin |
 | `POST /users` | Invite or create a user | Super Admin, Tenant Admin |
 | `POST /users/:id/resend-invite` | Resend an invitation | Super Admin, Tenant Admin |
 | `PATCH /users/:id` | Change a user's role or status | Super Admin, Tenant Admin |
@@ -302,17 +301,14 @@ Having a role is necessary but not always sufficient.
 | Reasons | Closing an alert, rejecting a case and deleting a customer each require a written reason. Closing a case takes an optional reason; a standard "no suspicious activity" text is used if none is given. |
 | PII reveal | Unmasked BVN/NIN is shown only on explicit request with a reason, is hidden again after a short time, and every reveal is audited. |
 | Role changes | Nobody changes their own role or status. Only a Super Admin changes a Super Admin. |
-| Tenant isolation | Every query is limited to the user's tenant by the database. Only a Super Admin can act as another tenant; what they then do is audited against the tenant they act in. |
+| Tenant isolation | Every query is limited to the user's tenant by the database. Only a Super Admin can act as another tenant; starting to act as a tenant is logged in that tenant's audit log, and so are the actions taken there. |
 | Super Admin and cases | A Super Admin can read cases but cannot open, submit, approve, reject or close them. |
 | Password change | A user created with a temporary password can do nothing except change it until they do. |
-| Audit | Sign-ins (success and failure), password and MFA changes, user invitations and changes, tenant creation and renaming, and customer, alert, case and report actions are written to an append-only audit log. |
+| Audit | Sign-ins (success and failure), password and MFA changes, user invitations and changes, tenant creation, renaming and switching into, and customer, alert, case and report actions are written to an append-only audit log. |
 
 ## 8. Points to confirm
 
-1. **User list is open to all roles.** `GET /users` and `GET /users/:id` currently answer any signed-in role in the
-   tenant. The console hides the Users page below Tenant Admin, but the API does not. We plan to restrict it to
-   Super Admin and Tenant Admin unless the host needs otherwise.
+1. **Colleague names.** Every signed-in role can read a names-only list of the tenant's users (`GET /users/directory`: id, name, role, status) so screens can show who assigned or decided something. Email and sign-in details are limited to Super Admin and Tenant Admin. Confirm that is acceptable.
 2. **Customer list for Viewer.** Viewers can list and open customers (BVN/NIN stay masked). Confirm that is intended.
 3. **MFA.** If the host already performs multi-factor authentication, RegOps can accept that instead of its own prompt.
-4. **Switching tenant is not audited.** When a Super Admin starts acting as another tenant, the switch itself is not logged; only the actions taken afterwards are. We intend to add a log entry for it.
-5. **Investigator scope.** Investigators cannot assign cases or close alerts. Confirm whether the host expects them to.
+4. **Investigator scope.** Investigators cannot assign cases or close alerts. Confirm whether the host expects them to.

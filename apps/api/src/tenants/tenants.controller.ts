@@ -67,8 +67,11 @@ export class TenantsController {
    */
   @Post("switch")
   @Roles(UserRole.SUPER_ADMIN)
-  async switchTenant(@Body() dto: SwitchTenantDto) {
-    return this.tenantsService.validateSwitch(dto.tenantId);
+  async switchTenant(@CurrentUser() currentUser: AuthUserContext, @Body() dto: SwitchTenantDto, @Req() req: Request) {
+    return this.tenantsService.switchTo(dto.tenantId, currentUser, {
+      ipAddress: req.ip ?? null,
+      userAgent: req.header("user-agent") ?? null,
+    });
   }
 
   @Get(":id")

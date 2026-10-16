@@ -62,6 +62,23 @@ describe("Tenant isolation (e2e)", () => {
     expect(emails).not.toContain(tenantBViewer.email);
   });
 
+  it("keeps the full user list admin-only and gives other roles a names-only directory", async () => {
+    const { user: viewer, password } = await createUserFixture(ctx.adminDataSource, tenantAId, {
+      email: "tenantA-viewer-directory@test.dev",
+      role: UserRole.VIEWER,
+    });
+    const token = await loginAs(viewer.email, password);
+
+    await http().get("/users").set("Authorization", `Bearer ${token}`).expect(403);
+    await http().get(`/users/${viewer.id}`).set("Authorization", `Bearer ${token}`).expect(403);
+
+    const res = await http().get("/users/directory").set("Authorization", `Bearer ${token}`).expect(200);
+    expect(res.body.data.map((u: { id: string }) => u.id)).toContain(viewer.id);
+    for (const u of res.body.data) {
+      expect(Object.keys(u).sort()).toEqual(["fullName", "id", "role", "status"]);
+    }
+  });
+
   it("returns 404 (not 403) when a tenant A user reads a tenant B user by id", async () => {
     const { user: tenantAAdmin, password } = await createUserFixture(
       ctx.adminDataSource,
